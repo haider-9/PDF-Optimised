@@ -1,0 +1,15 @@
+# ninja log v7
+5	470	1793292366218331310	CanvasPDF_autogen/timestamp	6c2c99d4f473e38d
+5	470	1793292366218331310	CanvasPDF_autogen/mocs_compilation.cpp	6c2c99d4f473e38d
+5	470	1793292366218331310	/home/haider/Projects/CanvasPDF/build/CanvasPDF_autogen/timestamp	6c2c99d4f473e38d
+5	470	1793292366218331310	/home/haider/Projects/CanvasPDF/build/CanvasPDF_autogen/mocs_compilation.cpp	6c2c99d4f473e38d
+58	79	1793291477420264450	CMakeFiles/CanvasPDF.dir/CanvasPDF_autogen/mocs_compilation.cpp.o	a51d74187c4f533e
+470	5009	1793292366683331345	CMakeFiles/CanvasPDF.dir/src/main.cpp.o	a186db149e36eba8
+5010	5465	1793292371223331687	CanvasPDF	3e54f7b9e3997418
+5	507	1793292726477358411	CanvasPDF_autogen/timestamp	6c2c99d4f473e38d
+5	507	1793292726477358411	CanvasPDF_autogen/mocs_compilation.cpp	6c2c99d4f473e38d
+5	507	1793292726477358411	/home/haider/Projects/CanvasPDF/build/CanvasPDF_autogen/timestamp	6c2c99d4f473e38d
+5	507	1793292726477358411	/home/haider/Projects/CanvasPDF/build/CanvasPDF_autogen/mocs_compilation.cpp	6c2c99d4f473e38d
+508	524	1793292726980358449	CMakeFiles/CanvasPDF.dir/CanvasPDF_autogen/mocs_compilation.cpp.o	a03631c05091c94c
+508	5450	1793292726981539584	CMakeFiles/CanvasPDF.dir/src/main.cpp.o	5ef0a37227abe88e
+5450	5820	1793292731922358820	CanvasPDF	3e54f7b9e3997418
