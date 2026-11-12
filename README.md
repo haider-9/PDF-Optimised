@@ -13,8 +13,10 @@ without relying on a browser runtime or uploading documents to a web service.
 - Technology Stack
 - System Requirements
 - Install Dependencies on Arch Linux
+- Install Dependencies on Windows
 - Verify Dependencies
 - Build from Source
+- Build and Run on Windows
 - Run CanvasPDF
 - Install Locally
 - Keyboard and Mouse Controls
@@ -30,8 +32,9 @@ interface and MuPDF for PDF rendering.
 
 The project uses CMake as its build system and Ninja as its build backend.
 
-The project is intended to support Linux and Windows. The instructions in
-this README cover building and running the application on Arch Linux.
+The project supports Linux and Windows builds. Linux instructions use Arch
+Linux; Windows instructions use the MSYS2 UCRT64 environment so Qt, MuPDF,
+pkg-config, and the compiler come from one compatible toolchain.
 
 ## Features
 
@@ -72,6 +75,10 @@ For the Linux build, install:
 - MuPDF development libraries and headers
 - MuPDF command-line tools
 - pkg-config
+
+For Windows, use 64-bit Windows 10 or later with MSYS2 UCRT64, MinGW-w64,
+CMake, Ninja, Qt 6 Widgets, MuPDF, and pkgconf. Build and launch the app from
+the UCRT64 shell so its runtime DLLs are on `PATH`.
 
 Git and GitHub CLI are optional for building the application but useful
 for source control and publishing the project.
@@ -134,6 +141,35 @@ sudo pacman -S --needed xorg-xwayland
 
 The Qt XCB platform plugin must also be available through the installed
 Qt packages.
+
+## Install Dependencies on Windows
+
+1. Install MSYS2 from [msys2.org](https://www.msys2.org/) using its default
+   location, `C:\msys64`.
+2. Open **MSYS2 UCRT64** from the Start menu. Do not use the plain MSYS, MINGW64,
+   or CLANG64 terminal for this recipe.
+3. Update the environment:
+
+```bash
+pacman -Syu
+```
+
+If the updater asks you to close the terminal, close it, reopen **MSYS2
+UCRT64**, and run `pacman -Syu` again until no updates remain.
+4. Install the compiler, build tools, Qt, MuPDF, and pkgconf:
+
+```bash
+pacman -S --needed \
+  mingw-w64-ucrt-x86_64-toolchain \
+  mingw-w64-ucrt-x86_64-cmake \
+  mingw-w64-ucrt-x86_64-ninja \
+  mingw-w64-ucrt-x86_64-qt6-base \
+  mingw-w64-ucrt-x86_64-libmupdf \
+  mingw-w64-ucrt-x86_64-pkgconf
+```
+
+These packages provide the MinGW-w64 C++ compiler, Qt 6 Widgets, MuPDF's
+headers and libraries, and the `mupdf` pkg-config metadata used by CMake.
 
 ## Verify Dependencies
 
@@ -237,6 +273,41 @@ QT_QPA_PLATFORM=xcb ./build/CanvasPDF
 This changes the Qt platform backend for that launch only.
 
 Use the application's file-opening control to select a PDF document.
+
+## Build and Run on Windows
+
+Open **MSYS2 UCRT64** and change to the project directory. For example, a
+project under your Windows profile is available as
+`/c/Users/<username>/Projects/CanvasPDF`:
+
+```bash
+cd /c/Users/<username>/Projects/CanvasPDF
+```
+
+Configure and build in a separate directory so a Linux `build/` directory is
+not reused:
+
+```bash
+cmake -S . -B build-windows -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-windows
+```
+
+Launch the native Windows GUI executable from the same UCRT64 shell:
+
+```bash
+./build-windows/CanvasPDF.exe
+```
+
+To open a PDF from the command line, quote its path when it contains spaces:
+
+```bash
+./build-windows/CanvasPDF.exe "/c/Users/<username>/Documents/example.pdf"
+```
+
+The UCRT64 shell supplies Qt, MuPDF, and MinGW runtime DLL locations. The
+executable is not a self-contained Windows installer; do not copy it alone to
+another PC. A redistributable package must include the Qt platform plugin,
+MuPDF and its runtime dependencies, and comply with MuPDF's licensing terms.
 
 ## Install CanvasPDF for Your User
 

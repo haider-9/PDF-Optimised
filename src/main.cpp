@@ -797,10 +797,9 @@ int main(int argc, char *argv[])
     MainWindow window;
     window.show();
 
-    if (argc > 1)
-        window.openFromCommandLine(
-            QString::fromLocal8Bit(argv[1])
-        );
+    const QStringList arguments = QCoreApplication::arguments();
+    if (arguments.size() > 1)
+        window.openFromCommandLine(arguments.at(1));
 
     return app.exec();
 }
