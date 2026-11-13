@@ -9,6 +9,7 @@ without relying on a browser runtime or uploading documents to a web service.
 ## Table of Contents
 
 - Overview
+- Download a Release
 - Features
 - Technology Stack
 - System Requirements
@@ -21,6 +22,7 @@ without relying on a browser runtime or uploading documents to a web service.
 - Install Locally
 - Keyboard and Mouse Controls
 - Git and GitHub CLI
+- Publishing a Release
 - Troubleshooting
 - Current Limitations
 - Licensing
@@ -36,16 +38,37 @@ The project supports Linux and Windows builds. Linux instructions use Arch
 Linux; Windows instructions use the MSYS2 UCRT64 environment so Qt, MuPDF,
 pkg-config, and the compiler come from one compatible toolchain.
 
+## Download a Release
+
+Prebuilt packages are published on the
+[Releases](https://github.com/haider-9/PDF-Optimised/releases) page. No
+build tools or libraries are needed.
+
+- **Windows:** download `CanvasPDF-windows-x64.zip`, extract it anywhere,
+  and run `CanvasPDF.exe`.
+- **Linux:** download `CanvasPDF-linux-x86_64.AppImage`, make it
+  executable with `chmod +x`, and run it:
+
+  ```bash
+  chmod +x CanvasPDF-linux-x86_64.AppImage
+  ./CanvasPDF-linux-x86_64.AppImage
+  ```
+
+CanvasPDF is licensed under AGPL-3.0. The source code is in this repository,
+and the license is included with each download.
+
 ## Features
 
 - Native desktop application
-- PDF rendering using MuPDF
-- Mouse-wheel zoom
-- Mouse-based panning
-- Page navigation
+- PDF rendering using MuPDF, with a quick preview while zooming
+- Start page with recently opened PDFs that still exist on disk
+- Mouse-wheel zoom, mouse-based panning, and page navigation
 - Fit-to-view and zoom controls
-- Basic pencil annotation mode
-- Background PDF rendering
+- Mini map in the bottom-right corner: click to enlarge, drag to pan
+- Pencil annotation mode
+- Optional line counters: create counters with their own colors, count lines
+  per page or per document, and step through them with keyboard shortcuts
+- Undo and redo for pencil lines (Ctrl+Z, Ctrl+Y)
 - CMake-based build configuration
 
 Feature availability may change as the application develops.
@@ -361,6 +384,21 @@ cmake --build build -j2
 The clean rebuild removes generated build files. It does not remove the
 source files in `src/`.
 
+## Publishing a Release
+
+Releases are built by GitHub Actions from `.github/workflows/release.yml`.
+Pushing a version tag builds the Windows and Linux packages and publishes
+them to a new release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+To test the packaging without publishing, run the **Release** workflow by
+hand from the Actions tab. Its packages appear as downloadable artifacts of
+that run.
+
 ## Keyboard and Mouse Controls
 
 | Input | Action |
@@ -540,12 +578,12 @@ may require substantial memory even when the PDF file itself is stored on disk.
 
 ## Licensing
 
-MuPDF is available under the GNU Affero General Public License (AGPL) or a
-commercial license, subject to the applicable terms.
+CanvasPDF is licensed under the GNU Affero General Public License, version 3
+(AGPL-3.0). See [LICENSE](LICENSE).
 
-Review the license requirements before redistributing CanvasPDF. In
-particular, assess the obligations that apply if distributing a modified
-MuPDF-based application or a closed-source product.
+CanvasPDF uses MuPDF, which is available under AGPL-3.0 or a commercial
+license from Artifex. Because CanvasPDF links to MuPDF, distributing it
+requires providing its complete source code under AGPL-3.0. Anyone who
+redistributes a modified version must do the same.
 
 This section is informational and is not legal advice.
-# PDF-Optimised

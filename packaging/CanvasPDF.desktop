@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=CanvasPDF
+Comment=Fast native PDF viewer
+Exec=CanvasPDF %f
+Icon=canvaspdf
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;
