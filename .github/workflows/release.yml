@@ -33,7 +33,7 @@ jobs:
           # records those indirect dependencies so the link succeeds.
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXE_LINKER_FLAGS="-Wl,--copy-dt-needed-entries" \
-            -DCMAKE_CXX_STANDARD_LIBRARIES="-lmujs"
+            -DCMAKE_CXX_STANDARD_LIBRARIES="-lmujs -lgumbo -ljpeg -ljbig2dec -lopenjp2 -lharfbuzz -lfreetype -lz"
           cmake --build build
 
       - name: Package AppImage
