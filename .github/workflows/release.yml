@@ -24,25 +24,37 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build pkg-config \
-            qt6-base-dev libgl1-mesa-dev libfuse2t64 \
-            libbrotli-dev libfreetype-dev libharfbuzz-dev libjpeg-dev \
-            libopenjp2-7-dev libjbig2dec-dev libgumbo-dev libmujs-dev \
-            libz-dev
+            qt6-base-dev libgl1-mesa-dev libfuse2t64
 
-      # Build the same MuPDF version the project is developed against, as a
-      # shared library with its own dependencies bundled. Ubuntu's packaged
-      # MuPDF is a different version and cannot be linked reliably.
+      # Build the same MuPDF version the project is developed against, with
+      # its own bundled dependencies, as static libraries. Ubuntu's packaged
+      # MuPDF is a different version and does not link reliably.
       - name: Build MuPDF
         run: |
           set -euo pipefail
           git clone --depth 1 --branch "$MUPDF_VERSION" \
             https://github.com/ArtifexSoftware/mupdf.git "$RUNNER_TEMP/mupdf"
           cd "$RUNNER_TEMP/mupdf"
-          make -j"$(nproc)" shared=yes release=yes HAVE_X11=no HAVE_GLUT=no \
-            prefix="$RUNNER_TEMP/mupdf-install" install
-          test -f "$RUNNER_TEMP/mupdf-install/lib/pkgconfig/mupdf.pc"
-          echo "PKG_CONFIG_PATH=$RUNNER_TEMP/mupdf-install/lib/pkgconfig" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/mupdf-install/lib" >> "$GITHUB_ENV"
+          make -j"$(nproc)" release HAVE_X11=no HAVE_GLUT=no
+
+          prefix="$RUNNER_TEMP/mupdf-install"
+          mkdir -p "$prefix/lib/pkgconfig" "$prefix/include"
+          cp -r include/mupdf include/mupdf "$prefix/include/" 2>/dev/null || true
+          cp -r include/* "$prefix/include/"
+          cp build/release/libmupdf.a "$prefix/lib/"
+          cp build/release/libmupdf-third.a "$prefix/lib/"
+
+          # CMake finds MuPDF through pkg-config, as it does on developer machines.
+          cat > "$prefix/lib/pkgconfig/mupdf.pc" <<PC
+          prefix=$prefix
+          Name: mupdf
+          Description: MuPDF
+          Version: $MUPDF_VERSION
+          Cflags: -I\${prefix}/include
+          Libs: -L\${prefix}/lib -lmupdf -lmupdf-third -lm -lpthread
+          PC
+          pkg-config --cflags --libs "$prefix/lib/pkgconfig/mupdf.pc" > /dev/null
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
 
       - name: Build
         run: |
@@ -70,7 +82,6 @@ jobs:
           ./linuxdeploy \
             --appdir AppDir \
             --executable build/CanvasPDF \
-            --library "$RUNNER_TEMP/mupdf-install/lib/libmupdf.so" \
             --desktop-file packaging/CanvasPDF.desktop \
             --icon-file packaging/canvaspdf.png \
             --plugin qt \
