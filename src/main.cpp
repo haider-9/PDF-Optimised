@@ -33,7 +33,11 @@
 #include <QIcon>
 #include <QPalette>
 #include <QHBoxLayout>
+#include <QVBoxLayout>
 #include <QToolButton>
+#include <QFrame>
+#include <QPen>
+#include <QBrush>
 #include <QStyle>
 
 #include <mupdf/fitz.h>
@@ -338,8 +342,15 @@ public:
 signals:
     void zoomChanged(double zoom);
     void pencilModeChanged(bool enabled);
+    void viewportResized();
 
 protected:
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QGraphicsView::resizeEvent(event);
+        emit viewportResized();
+    }
+
     void wheelEvent(QWheelEvent *event) override
     {
         const double steps = event->angleDelta().y() / 120.0;
@@ -476,6 +487,220 @@ private:
 };
 
 
+// Shows a thumbnail of the current page with a rectangle marking the
+// visible area. Interactive maps pan the canvas when dragged; the small
+// one only reports clicks so the window can open the enlarged map.
+class MiniMap : public QWidget
+{
+    Q_OBJECT
+
+public:
+    explicit MiniMap(QWidget *parent = nullptr) : QWidget(parent)
+    {
+        setExpanded(false);
+    }
+
+    bool isExpanded() const
+    {
+        return m_expanded;
+    }
+
+    void setExpanded(bool expanded)
+    {
+        m_expanded = expanded;
+        setFixedSize(expanded ? 380 : 96, expanded ? 380 : 60);
+        setCursor(expanded ? Qt::OpenHandCursor : Qt::PointingHandCursor);
+        update();
+    }
+
+    void setThumbnail(const QPixmap &thumbnail)
+    {
+        m_thumbnail = thumbnail;
+        update();
+    }
+
+    // Visible area in page-normalized coordinates, where (0,0)-(1,1)
+    // is the whole page.
+    void setViewport(const QRectF &viewport)
+    {
+        m_viewport = viewport;
+        update();
+    }
+
+signals:
+    // Emitted when the user clicks the map (collapsed) or its close corner.
+    void toggled();
+    void panRequested(const QPointF &center);
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+
+        const QPalette pal = palette();
+        painter.fillRect(rect(), pal.color(QPalette::Base));
+
+        const QRectF image = imageRect();
+        if (image.isEmpty())
+            return;
+
+        painter.drawPixmap(
+            image,
+            m_thumbnail,
+            QRectF(m_thumbnail.rect())
+        );
+
+        painter.setClipRect(image);
+
+        const QRectF view(
+            image.left() + m_viewport.left() * image.width(),
+            image.top() + m_viewport.top() * image.height(),
+            m_viewport.width() * image.width(),
+            m_viewport.height() * image.height()
+        );
+
+        const QColor accent = pal.color(QPalette::Highlight);
+        QColor fill = accent;
+        fill.setAlpha(60);
+
+        painter.setPen(QPen(accent, 2));
+        painter.setBrush(fill);
+        painter.drawRect(view);
+
+        painter.setClipping(false);
+        painter.setPen(QPen(pal.color(QPalette::Mid), 1));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(rect().adjusted(0, 0, -1, -1));
+
+        if (m_expanded) {
+            // Close glyph in the top-right corner.
+            const QRectF close = closeRect().adjusted(6, 6, -6, -6);
+            painter.setPen(QPen(pal.color(QPalette::ButtonText), 2));
+            painter.drawLine(close.topLeft(), close.bottomRight());
+            painter.drawLine(close.topRight(), close.bottomLeft());
+        }
+    }
+
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        if (event->button() != Qt::LeftButton)
+            return;
+
+        if (!m_expanded) {
+            m_pressed = true;
+            return;
+        }
+
+        if (closeRect().contains(event->position())) {
+            m_pressed = true;
+            return;
+        }
+
+        if (imageRect().isEmpty())
+            return;
+
+        const QPointF point = normalized(event->position());
+
+        m_dragging = true;
+        m_grabOffset = m_viewport.contains(point)
+            ? point - m_viewport.center()
+            : QPointF();
+
+        if (!m_viewport.contains(point))
+            emit panRequested(clamped(point));
+
+        setCursor(Qt::ClosedHandCursor);
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        if (!m_dragging)
+            return;
+
+        emit panRequested(
+            clamped(normalized(event->position()) - m_grabOffset)
+        );
+        event->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (event->button() != Qt::LeftButton)
+            return;
+
+        if (!m_expanded) {
+            if (m_pressed && rect().contains(event->position().toPoint()))
+                emit toggled();
+
+            m_pressed = false;
+            return;
+        }
+
+        if (m_pressed) {
+            m_pressed = false;
+            if (closeRect().contains(event->position()))
+                emit toggled();
+            return;
+        }
+
+        m_dragging = false;
+        setCursor(Qt::OpenHandCursor);
+    }
+
+private:
+    QRectF closeRect() const
+    {
+        return QRectF(width() - 28, 4, 24, 24);
+    }
+
+    // Area where the thumbnail is drawn, keeping the page's aspect ratio.
+    QRectF imageRect() const
+    {
+        if (m_thumbnail.isNull())
+            return QRectF();
+
+        const QRectF area = QRectF(rect()).adjusted(4, 4, -4, -4);
+
+        QSizeF size(m_thumbnail.size());
+        size.scale(area.size(), Qt::KeepAspectRatio);
+
+        QRectF result(QPointF(), size);
+        result.moveCenter(area.center());
+        return result;
+    }
+
+    QPointF normalized(const QPointF &point) const
+    {
+        const QRectF image = imageRect();
+        if (image.isEmpty())
+            return QPointF();
+
+        return QPointF(
+            (point.x() - image.left()) / image.width(),
+            (point.y() - image.top()) / image.height()
+        );
+    }
+
+    static QPointF clamped(const QPointF &point)
+    {
+        return QPointF(
+            qBound(0.0, point.x(), 1.0),
+            qBound(0.0, point.y(), 1.0)
+        );
+    }
+
+    bool m_expanded = false;
+    bool m_pressed = false;
+    bool m_dragging = false;
+
+    QPixmap m_thumbnail;
+    QRectF m_viewport;
+    QPointF m_grabOffset;
+};
+
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -572,6 +797,30 @@ public:
 
         // Permanent widgets sit at the right end of the status bar.
         statusBar()->addPermanentWidget(zoomControls);
+
+        // Overview pinned to the bottom-right corner of the canvas. It is
+        // a child of the canvas so it floats over the page, and it is
+        // hidden until a PDF is open.
+        miniMap = new MiniMap(canvas);
+        miniMap->hide();
+
+        connect(miniMap, &MiniMap::toggled,
+                this, &MainWindow::toggleMiniMap);
+
+        connect(miniMap, &MiniMap::panRequested,
+                this, &MainWindow::panToNormalized);
+
+        connect(canvas, &PdfCanvas::viewportResized,
+                this, &MainWindow::positionMiniMap);
+
+        connect(canvas->horizontalScrollBar(), &QScrollBar::valueChanged,
+                this, &MainWindow::updateMiniMapViewport);
+
+        connect(canvas->verticalScrollBar(), &QScrollBar::valueChanged,
+                this, &MainWindow::updateMiniMapViewport);
+
+        connect(canvas, &PdfCanvas::zoomChanged,
+                this, &MainWindow::updateMiniMapViewport);
 
         statusBar()->showMessage("Open a PDF to begin.");
 
@@ -749,6 +998,7 @@ private slots:
         pageItem->setPixmap(QPixmap());
         canvas->resetTransform();
         scene->setSceneRect(QRectF());
+        updateMiniMapThumbnail();
 
         pageNumber->setEnabled(false);
 
@@ -848,6 +1098,82 @@ private slots:
                 .arg(currentPage + 1)
                 .arg(pageCount)
         );
+
+        updateMiniMapThumbnail();
+    }
+
+    void updateMiniMapThumbnail()
+    {
+        const QPixmap page = pageItem->pixmap();
+
+        QPixmap thumbnail;
+        if (!page.isNull()) {
+            thumbnail = page.scaled(
+                480,
+                480,
+                Qt::KeepAspectRatio,
+                Qt::SmoothTransformation
+            );
+        }
+
+        miniMap->setThumbnail(thumbnail);
+        miniMap->setVisible(!thumbnail.isNull());
+        positionMiniMap();
+        updateMiniMapViewport();
+    }
+
+    // Marks the visible part of the page on both minimaps.
+    void updateMiniMapViewport()
+    {
+        const QRectF page = pageItem->sceneBoundingRect();
+
+        if (pageItem->pixmap().isNull() || page.isEmpty()) {
+            miniMap->setViewport(QRectF());
+            return;
+        }
+
+        const QRectF visible =
+            canvas->mapToScene(canvas->viewport()->rect()).boundingRect();
+
+        const QRectF viewport(
+            (visible.left() - page.left()) / page.width(),
+            (visible.top() - page.top()) / page.height(),
+            visible.width() / page.width(),
+            visible.height() / page.height()
+        );
+
+        miniMap->setViewport(viewport);
+    }
+
+    // Centers the canvas on a point given in page-normalized coordinates.
+    void panToNormalized(const QPointF &center)
+    {
+        const QRectF page = pageItem->sceneBoundingRect();
+        if (page.isEmpty())
+            return;
+
+        canvas->centerOn(
+            page.left() + center.x() * page.width(),
+            page.top() + center.y() * page.height()
+        );
+    }
+
+    void toggleMiniMap()
+    {
+        miniMap->setExpanded(!miniMap->isExpanded());
+        positionMiniMap();
+        updateMiniMapViewport();
+    }
+
+    // Keeps the mini map anchored to the canvas's bottom-right corner.
+    void positionMiniMap()
+    {
+        const int margin = 12;
+        miniMap->move(
+            canvas->width() - miniMap->width() - margin,
+            canvas->height() - miniMap->height() - margin
+        );
+        miniMap->raise();
     }
 
     void onError(const QString &message)
@@ -881,6 +1207,8 @@ private:
     QGraphicsScene *scene = nullptr;
     PdfCanvas *canvas = nullptr;
     QGraphicsPixmapItem *pageItem = nullptr;
+
+    MiniMap *miniMap = nullptr;
 
     QSpinBox *pageNumber = nullptr;
     QLabel *zoomLabel = nullptr;
