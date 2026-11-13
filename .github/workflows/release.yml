@@ -28,7 +28,10 @@ jobs:
 
       - name: Build
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          # Qt's libraries need HarfBuzz at link time, which the build does not
+          # request itself on Ubuntu, so add it explicitly.
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXE_LINKER_FLAGS="-lharfbuzz"
           cmake --build build
 
       - name: Package AppImage
