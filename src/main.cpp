@@ -339,6 +339,12 @@ public:
         setFrameShape(QFrame::NoFrame);
     }
 
+    ~PdfCanvas() override
+    {
+        // Undone strokes are owned here, not by the scene.
+        discardRedo();
+    }
+
     double zoomLevel() const
     {
         return transform().m11();
@@ -1389,9 +1395,6 @@ public:
         worker = new PdfWorker;
         worker->moveToThread(&renderThread);
 
-        connect(&renderThread, &QThread::finished,
-                worker, &QObject::deleteLater);
-
         connect(this, &MainWindow::openRequested,
                 worker, &PdfWorker::openDocument);
 
@@ -1555,7 +1558,7 @@ public:
     {
         renderTimer.stop();
 
-        if (worker && renderThread.isRunning()) {
+        if (renderThread.isRunning()) {
             QMetaObject::invokeMethod(
                 worker,
                 "closeDocument",
@@ -1565,6 +1568,11 @@ public:
             renderThread.quit();
             renderThread.wait();
         }
+
+        // The render thread has stopped, so the worker can be freed here.
+        // Its destructor closes the document and its context.
+        delete worker;
+        worker = nullptr;
     }
 
     void openFromCommandLine(const QString &path)
