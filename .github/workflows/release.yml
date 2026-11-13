@@ -33,9 +33,11 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 --branch "$MUPDF_VERSION" \
+            --recurse-submodules --shallow-submodules \
             https://github.com/ArtifexSoftware/mupdf.git "$RUNNER_TEMP/mupdf"
           cd "$RUNNER_TEMP/mupdf"
-          make -j"$(nproc)" build=release HAVE_X11=no HAVE_GLUT=no libs
+          make -j"$(nproc)" build=release USE_SYSTEM_LIBS=no \
+            HAVE_X11=no HAVE_GLUT=no libs
 
           prefix="$RUNNER_TEMP/mupdf-install"
           mkdir -p "$prefix/lib/pkgconfig" "$prefix/include"
