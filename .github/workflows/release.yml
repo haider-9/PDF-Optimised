@@ -24,7 +24,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build pkg-config \
-            qt6-base-dev libgl1-mesa-dev libfuse2t64
+            qt6-base-dev libgl1-mesa-dev libfuse2t64 \
+            libbrotli-dev libfreetype-dev libharfbuzz-dev libjpeg-dev \
+            libopenjp2-7-dev libjbig2dec-dev libgumbo-dev libmujs-dev \
+            libz-dev
 
       # Build the same MuPDF version the project is developed against, as a
       # shared library with its own dependencies bundled. Ubuntu's packaged
