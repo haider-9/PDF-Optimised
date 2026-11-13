@@ -24,7 +24,7 @@ jobs:
           sudo apt-get install -y cmake ninja-build pkg-config \
             qt6-base-dev libmupdf-dev libgl1-mesa-dev libfuse2t64 \
             libfreetype-dev libharfbuzz-dev libjpeg-dev libopenjp2-7-dev \
-            libjbig2dec-dev libgumbo-dev libz-dev
+            libjbig2dec-dev libgumbo-dev libz-dev libmujs-dev
 
       - name: Build
         run: |
@@ -32,7 +32,8 @@ jobs:
           # FreeType, ...) that the link line does not list. This linker option
           # records those indirect dependencies so the link succeeds.
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--copy-dt-needed-entries"
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--copy-dt-needed-entries" \
+            -DCMAKE_CXX_STANDARD_LIBRARIES="-lmujs"
           cmake --build build
 
       - name: Package AppImage
