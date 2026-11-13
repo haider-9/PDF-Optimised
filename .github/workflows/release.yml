@@ -28,10 +28,11 @@ jobs:
 
       - name: Build
         run: |
-          # Qt's libraries need HarfBuzz at link time, which the build does not
-          # request itself on Ubuntu, so add it explicitly.
+          # Qt's Ubuntu libraries depend on several system libraries (HarfBuzz,
+          # FreeType, ...) that the link line does not list. This linker option
+          # records those indirect dependencies so the link succeeds.
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_STANDARD_LIBRARIES="-lharfbuzz"
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--copy-dt-needed-entries"
           cmake --build build
 
       - name: Package AppImage
