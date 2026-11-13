@@ -197,6 +197,8 @@ public slots:
         if (!ctx)
             return;
 
+        dropDisplayList();
+
         if (doc) {
             fz_drop_document(ctx, doc);
             doc = nullptr;
@@ -233,7 +235,57 @@ public slots:
         if (id != latestRequest.load() || m_cookie.abort != 0)
             return;
 
+        // The preview is on screen, so parse the page now. Later zooms only
+        // rasterize from the list.
+        buildDisplayList(pageIndex);
+
+        if (id != latestRequest.load() || m_cookie.abort != 0)
+            return;
+
         renderPass(pageIndex, finalScale, id, false);
+    }
+
+    void dropDisplayList()
+    {
+        if (displayList) {
+            fz_drop_display_list(ctx, displayList);
+            displayList = nullptr;
+        }
+        displayListPage = -1;
+    }
+
+    // Parses a page once into a display list. Rasterizing from the list is
+    // much faster than re-reading the page content for every zoom level.
+    bool buildDisplayList(int pageIndex)
+    {
+        if (displayList && displayListPage == pageIndex)
+            return true;
+
+        dropDisplayList();
+
+        fz_page *volatile page = nullptr;
+        fz_display_list *volatile list = nullptr;
+        volatile bool ok = false;
+
+        fz_try(ctx) {
+            page = fz_load_page(ctx, doc, pageIndex);
+            list = fz_new_display_list_from_page(ctx, page);
+            ok = true;
+        }
+        fz_always(ctx) {
+            if (page)
+                fz_drop_page(ctx, page);
+        }
+        fz_catch(ctx) {
+            ok = false;
+        }
+
+        if (ok && list) {
+            displayList = list;
+            displayListPage = pageIndex;
+        }
+
+        return ok && list;
     }
 
     // Draws one page at a scale into a buffer owned by the emitted image.
@@ -249,12 +301,21 @@ public slots:
         fz_page *volatile page = nullptr;
         fz_device *volatile device = nullptr;
         fz_pixmap *volatile pix = nullptr;
+        fz_display_list *list = nullptr;
         volatile bool ok = false;
 
         fz_try(ctx) {
-            page = fz_load_page(ctx, doc, pageIndex);
+            fz_rect bounds = {0, 0, 0, 0};
 
-            const fz_rect bounds = fz_bound_page(ctx, page);
+            // Use the cached display list when this page has one.
+            if (displayList && displayListPage == pageIndex) {
+                list = displayList;
+                bounds = fz_bound_display_list(ctx, list);
+            } else {
+                page = fz_load_page(ctx, doc, pageIndex);
+                bounds = fz_bound_page(ctx, page);
+            }
+
             const double width = bounds.x1 - bounds.x0;
             const double height = bounds.y1 - bounds.y0;
 
@@ -291,14 +352,17 @@ public slots:
             );
             fz_clear_pixmap_with_value(ctx, pix, 0xff);
 
-            device = fz_new_draw_device(ctx, fz_identity, pix);
-            fz_run_page(
-                ctx,
-                page,
-                device,
-                fz_concat(ctm, fz_translate(float(-box.x0), float(-box.y0))),
-                &m_cookie
+            const fz_matrix transform = fz_concat(
+                ctm,
+                fz_translate(float(-box.x0), float(-box.y0))
             );
+
+            device = fz_new_draw_device(ctx, fz_identity, pix);
+            if (list)
+                fz_run_display_list(ctx, list, device, transform,
+                                    fz_infinite_rect, &m_cookie);
+            else
+                fz_run_page(ctx, page, device, transform, &m_cookie);
             fz_close_device(ctx, device);
 
             pixX = box.x0;
@@ -350,6 +414,8 @@ private:
     fz_context *ctx = nullptr;
     fz_document *doc = nullptr;
     fz_cookie m_cookie{};
+    fz_display_list *displayList = nullptr;   // parsed page, reused by zooms
+    int displayListPage = -1;
     int pageCount = 0;
 };
 
