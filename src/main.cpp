@@ -30,11 +30,62 @@
 #include <QColor>
 #include <QMetaObject>
 #include <QtMath>
+#include <QIcon>
+#include <QPalette>
+#include <QHBoxLayout>
+#include <QToolButton>
+#include <QStyle>
 
 #include <mupdf/fitz.h>
 
 #include <atomic>
 #include <cmath>
+
+namespace {
+
+// Recolors an icon's pixels to one color, keeping their alpha shape.
+// Theme icons are often dark, which disappears on dark palettes.
+QIcon tintedIcon(const QIcon &source, const QColor &color)
+{
+    QIcon result;
+    const QList<int> sizes{16, 22, 24, 32};
+
+    for (int size : sizes) {
+        for (QIcon::Mode mode : {QIcon::Normal, QIcon::Disabled}) {
+            QPixmap pixmap = source.pixmap(size, size, mode);
+            if (pixmap.isNull())
+                continue;
+
+            QColor tint = color;
+            if (mode == QIcon::Disabled)
+                tint.setAlpha(110);
+
+            QPainter painter(&pixmap);
+            painter.setCompositionMode(
+                QPainter::CompositionMode_SourceIn
+            );
+            painter.fillRect(pixmap.rect(), tint);
+            painter.end();
+
+            result.addPixmap(pixmap, mode);
+        }
+    }
+
+    return result;
+}
+
+// Uses the desktop theme icon when available, otherwise the fallback.
+// The result is tinted to the active palette's button text color.
+QIcon themeIcon(const char *name, const QIcon &fallback = QIcon())
+{
+    const QIcon icon = QIcon::fromTheme(name);
+    const QColor color =
+        QApplication::palette().color(QPalette::ButtonText);
+
+    return tintedIcon(icon.isNull() ? fallback : icon, color);
+}
+
+} // namespace
 
 class PdfWorker : public QObject
 {
@@ -433,6 +484,11 @@ public:
     MainWindow()
     {
         setWindowTitle("CanvasPDF");
+        // The window icon keeps its own colors, so it is not tinted.
+        const QIcon windowIcon = QIcon::fromTheme("application-pdf");
+        setWindowIcon(windowIcon.isNull()
+            ? style()->standardIcon(QStyle::SP_FileIcon)
+            : windowIcon);
         resize(1250, 850);
 
         scene = new QGraphicsScene(this);
@@ -445,14 +501,46 @@ public:
 
         auto *toolbar = addToolBar("PDF Controls");
         toolbar->setMovable(false);
+        toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 
-        QAction *openAction = toolbar->addAction("Open PDF");
-        QAction *previousAction = toolbar->addAction("Previous");
-        QAction *nextAction = toolbar->addAction("Next");
-        QAction *fitAction = toolbar->addAction("Fit Page");
-        QAction *zoomOutAction = toolbar->addAction("−");
-        QAction *zoomInAction = toolbar->addAction("+");
-        pencilAction = toolbar->addAction("Pencil (N)");
+        QStyle *appStyle = style();
+
+        QAction *openAction = toolbar->addAction(
+            themeIcon("document-open",
+                      appStyle->standardIcon(QStyle::SP_DialogOpenButton)),
+            "Open PDF"
+        );
+        QAction *previousAction = toolbar->addAction(
+            themeIcon("go-previous",
+                      appStyle->standardIcon(QStyle::SP_ArrowBack)),
+            "Previous"
+        );
+        QAction *nextAction = toolbar->addAction(
+            themeIcon("go-next",
+                      appStyle->standardIcon(QStyle::SP_ArrowForward)),
+            "Next"
+        );
+        // Zoom actions live in the status bar, so they are not toolbar actions.
+        auto *fitAction = new QAction(
+            themeIcon("zoom-fit-best"),
+            "Fit Page",
+            this
+        );
+        auto *zoomOutAction = new QAction(
+            themeIcon("zoom-out"),
+            "−",
+            this
+        );
+        auto *zoomInAction = new QAction(
+            themeIcon("zoom-in"),
+            "+",
+            this
+        );
+        pencilAction = toolbar->addAction(
+            themeIcon("draw-freehand",
+                      themeIcon("document-edit")),
+            "Pencil (N)"
+        );
 
         pencilAction->setCheckable(true);
 
@@ -464,7 +552,26 @@ public:
         toolbar->addWidget(pageNumber);
 
         zoomLabel = new QLabel("100%", this);
-        toolbar->addWidget(zoomLabel);
+
+        auto *zoomControls = new QWidget(this);
+        auto *zoomLayout = new QHBoxLayout(zoomControls);
+        zoomLayout->setContentsMargins(0, 0, 0, 0);
+        zoomLayout->setSpacing(4);
+
+        auto addZoomButton = [this, zoomLayout](QAction *action) {
+            auto *button = new QToolButton(this);
+            button->setDefaultAction(action);
+            button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+            zoomLayout->addWidget(button);
+        };
+
+        addZoomButton(fitAction);
+        addZoomButton(zoomOutAction);
+        zoomLayout->addWidget(zoomLabel);
+        addZoomButton(zoomInAction);
+
+        // Permanent widgets sit at the right end of the status bar.
+        statusBar()->addPermanentWidget(zoomControls);
 
         statusBar()->showMessage("Open a PDF to begin.");
 
