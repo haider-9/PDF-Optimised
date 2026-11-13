@@ -207,6 +207,13 @@ public slots:
         pageCount = 0;
     }
 
+    // Stops the render in progress, if any. Called from the GUI thread;
+    // MuPDF checks the cookie while it draws, so this only sets a flag.
+    void cancelRender()
+    {
+        m_cookie.abort = 1;
+    }
+
     void renderPage(int pageIndex, double requestedScale, quint64 id)
     {
         if (id != latestRequest.load() || !ctx || !doc)
@@ -215,14 +222,34 @@ public slots:
         if (pageIndex < 0 || pageIndex >= pageCount)
             return;
 
-        fz_page *page = nullptr;
-        fz_pixmap *pix = nullptr;
+        m_cookie.abort = 0;
 
+        // Progressive render: a quarter-size preview appears quickly, then
+        // the full-resolution render replaces it. Each pass checks whether
+        // a newer request has arrived, so stale work stops early.
+        const double finalScale = qBound(0.15, requestedScale, 8.0);
+        renderPass(pageIndex, finalScale * 0.5, id, true);
+
+        if (id != latestRequest.load() || m_cookie.abort != 0)
+            return;
+
+        renderPass(pageIndex, finalScale, id, false);
+    }
+
+    // Draws one page at a scale into a buffer owned by the emitted image.
+    void renderPass(int pageIndex, double requestedScale, quint64 id,
+                    bool preview)
+    {
+        double scale = requestedScale;
+        QImage image;
         int pixX = 0;
         int pixY = 0;
-
-        double scale = qBound(0.15, requestedScale, 8.0);
         QString failure;
+
+        fz_page *volatile page = nullptr;
+        fz_device *volatile device = nullptr;
+        fz_pixmap *volatile pix = nullptr;
+        volatile bool ok = false;
 
         fz_try(ctx) {
             page = fz_load_page(ctx, doc, pageIndex);
@@ -241,59 +268,65 @@ public slots:
             if (pixels > maxPixels)
                 scale *= std::sqrt(maxPixels / pixels);
 
-            pix = fz_new_pixmap_from_page(
+            const fz_matrix ctm = fz_scale(float(scale), float(scale));
+            const fz_irect box = fz_round_rect(fz_transform_rect(bounds, ctm));
+            const int w = box.x1 - box.x0;
+            const int h = box.y1 - box.y0;
+
+            // MuPDF draws straight into the image's own buffer, so the page
+            // is never copied after rendering.
+            image = QImage(w, h, QImage::Format_RGB888);
+            if (image.isNull())
+                fz_throw(ctx, FZ_ERROR_GENERIC, "Not enough memory");
+
+            pix = fz_new_pixmap_with_data(
+                ctx,
+                fz_device_rgb(ctx),
+                w,
+                h,
+                nullptr,
+                0,
+                image.bytesPerLine(),
+                image.bits()
+            );
+            fz_clear_pixmap_with_value(ctx, pix, 0xff);
+
+            device = fz_new_draw_device(ctx, fz_identity, pix);
+            fz_run_page(
                 ctx,
                 page,
-                fz_scale(scale, scale),
-                fz_device_rgb(ctx),
-                0
+                device,
+                fz_concat(ctm, fz_translate(float(-box.x0), float(-box.y0))),
+                &m_cookie
             );
+            fz_close_device(ctx, device);
 
-            pixX = fz_pixmap_x(ctx, pix);
-            pixY = fz_pixmap_y(ctx, pix);
+            pixX = box.x0;
+            pixY = box.y0;
+            ok = true;
+        }
+        fz_always(ctx) {
+            if (device)
+                fz_drop_device(ctx, device);
+            if (pix)
+                fz_drop_pixmap(ctx, pix);
+            if (page)
+                fz_drop_page(ctx, page);
         }
         fz_catch(ctx) {
+            ok = false;
             failure = QString::fromUtf8(fz_caught_message(ctx));
         }
 
-        if (failure.isEmpty() && pix &&
-            id == latestRequest.load()) {
+        // A cancelled render is normal during fast zooming: stay silent.
+        const bool cancelled = m_cookie.abort != 0;
 
-            const int width = fz_pixmap_width(ctx, pix);
-            const int height = fz_pixmap_height(ctx, pix);
-            const int stride = fz_pixmap_stride(ctx, pix);
-            const int components = fz_pixmap_components(ctx, pix);
-
-            if (components == 3) {
-                QImage image(
-                    fz_pixmap_samples(ctx, pix),
-                    width,
-                    height,
-                    stride,
-                    QImage::Format_RGB888
-                );
-
-                emit pageRendered(
-                    image.copy(),
-                    pageIndex,
-                    id,
-                    scale,
-                    pixX,
-                    pixY
-                );
-            } else {
-                failure = "Unexpected PDF pixel format.";
-            }
-        }
-
-        if (pix)
-            fz_drop_pixmap(ctx, pix);
-
-        if (page)
-            fz_drop_page(ctx, page);
-
-        if (!failure.isEmpty() && id == latestRequest.load())
+        if (ok && id == latestRequest.load() && !image.isNull()) {
+            emit pageRendered(image, pageIndex, id, scale, pixX, pixY,
+                              preview);
+        } else if (!ok && !cancelled && id == latestRequest.load()) {
             emit errorOccurred("Rendering failed: " + failure);
+        }
     }
 
 signals:
@@ -307,7 +340,8 @@ signals:
         quint64 requestId,
         double renderScale,
         int pixelX,
-        int pixelY
+        int pixelY,
+        bool preview
     );
 
     void errorOccurred(const QString &message);
@@ -315,6 +349,7 @@ signals:
 private:
     fz_context *ctx = nullptr;
     fz_document *doc = nullptr;
+    fz_cookie m_cookie{};
     int pageCount = 0;
 };
 
@@ -1390,7 +1425,7 @@ public:
         statusBar()->showMessage("Open a PDF to begin.");
 
         renderTimer.setSingleShot(true);
-        renderTimer.setInterval(180);
+        renderTimer.setInterval(120);
 
         worker = new PdfWorker;
         worker->moveToThread(&renderThread);
@@ -1463,7 +1498,10 @@ public:
                 QString("%1%").arg(qRound(zoom * 100))
             );
 
-            renderTimer.start();
+            // Restart only when idle, so a long zoom still renders every
+            // 120 ms and always renders its final level.
+            if (!renderTimer.isActive())
+                renderTimer.start();
         });
 
         connect(pageNumber, &QSpinBox::valueChanged,
@@ -1622,6 +1660,7 @@ private slots:
         pageCount = 0;
         currentPage = 0;
         fitOnNextRender = true;
+        thumbnailPage = -1;
 
         canvas->setPencilMode(false);
         canvas->clearAnnotations();
@@ -1680,6 +1719,9 @@ private slots:
         const quint64 id = ++requestId;
         worker->latestRequest.store(id);
 
+        // The previous zoom level is stale now: stop rendering it.
+        worker->cancelRender();
+
         const double dpr = devicePixelRatioF();
         const double renderScale = canvas->zoomLevel() * dpr;
 
@@ -1696,7 +1738,8 @@ private slots:
         quint64 id,
         double renderScale,
         int pixelX,
-        int pixelY
+        int pixelY,
+        bool preview
     )
     {
         if (id != requestId || page != currentPage)
@@ -1717,6 +1760,10 @@ private slots:
         );
 
         scene->setSceneRect(pageItem->sceneBoundingRect());
+
+        // The preview only shows the page while the full render is pending.
+        if (preview)
+            return;
 
         if (fitOnNextRender) {
             fitOnNextRender = false;
@@ -1747,7 +1794,11 @@ private slots:
             applyFocus(pendingFocusRect);
         }
 
-        updateMiniMapThumbnail();
+        // The thumbnail only depends on the page, not the zoom level.
+        if (page != thumbnailPage)
+            updateMiniMapThumbnail();
+        else
+            updateMiniMapViewport();
     }
 
     void updateMiniMapThumbnail()
@@ -1756,6 +1807,7 @@ private slots:
 
         QPixmap thumbnail;
         if (!page.isNull()) {
+            thumbnailPage = currentPage;
             thumbnail = page.scaled(
                 480,
                 480,
@@ -2188,6 +2240,7 @@ private:
     quint64 openId = 0;
     QString pendingOpenPath;
     bool fitOnNextRender = true;
+    int thumbnailPage = -1;
 };
 
 
