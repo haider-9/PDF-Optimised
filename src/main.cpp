@@ -44,6 +44,11 @@
 #include <QPen>
 #include <QBrush>
 #include <QStyle>
+#include <QDesktopServices>
+#include <QMetaType>
+#include <QUrl>
+#include <QKeyEvent>
+#include <QGuiApplication>
 
 #include <mupdf/fitz.h>
 
@@ -55,6 +60,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <utility>
 #include <cmath>
 
 namespace {
@@ -112,6 +118,15 @@ struct CounterDef {
     QColor color;
 };
 
+// A clickable area of a page. Positions are fractions (0 to 1) of the page
+// size, so they stay valid at any zoom level.
+struct PageLink {
+    QRectF rect;
+    QString uri;               // external target; empty for internal links
+    int targetPage = -1;       // internal target page; -1 when none
+    QPointF target;            // destination on the target page
+    bool hasTarget = false;    // true when the link names a point
+};
 QColor defaultPenColor()
 {
     return QColor("#ff6b35");
@@ -130,6 +145,23 @@ QColor counterPaletteColor(int index)
 }
 
 } // namespace
+
+// Qt needs this outside the anonymous namespace to pass PageLink in signals.
+Q_DECLARE_METATYPE(PageLink)
+
+// Maps a rectangle given in page coordinates to fractions of the page.
+QRectF normalizedRect(fz_rect rect, fz_rect bounds)
+{
+    const double w = bounds.x1 - bounds.x0;
+    const double h = bounds.y1 - bounds.y0;
+    if (w <= 0 || h <= 0)
+        return QRectF();
+
+    return QRectF(
+        QPointF((rect.x0 - bounds.x0) / w, (rect.y0 - bounds.y0) / h),
+        QPointF((rect.x1 - bounds.x0) / w, (rect.y1 - bounds.y0) / h)
+    ).normalized();
+}
 
 class PdfWorker : public QObject
 {
@@ -243,6 +275,113 @@ public slots:
             return;
 
         renderPass(pageIndex, finalScale, id, false);
+    }
+
+    // Reads the clickable links of a page. Positions are returned as
+    // fractions of the page size, and internal targets are resolved to a
+    // page index and a point on that page.
+    void loadLinks(int pageIndex, quint64 id)
+    {
+        if (!ctx || !doc || pageIndex < 0 || pageIndex >= pageCount)
+            return;
+
+        QList<PageLink> result;
+        QHash<int, fz_rect> targetBounds;
+        fz_page *volatile page = nullptr;
+        fz_link *volatile links = nullptr;
+        volatile bool ok = false;
+
+        fz_try(ctx) {
+            page = fz_load_page(ctx, doc, pageIndex);
+            const fz_rect bounds = fz_bound_page(ctx, page);
+            links = fz_load_links(ctx, page);
+
+            for (fz_link *link = links; link; link = link->next) {
+                if (!link->uri)
+                    continue;
+
+                PageLink item;
+                item.rect = normalizedRect(link->rect, bounds);
+                if (item.rect.isEmpty())
+                    continue;
+
+                if (fz_is_external_link(ctx, link->uri)) {
+                    item.uri = QString::fromUtf8(link->uri);
+                    result.append(item);
+                    continue;
+                }
+
+                float xp = 0.0f;
+                float yp = 0.0f;
+                const fz_location location =
+                    fz_resolve_link(ctx, doc, link->uri, &xp, &yp);
+                if (location.page < 0)
+                    continue;
+
+                const int target =
+                    fz_page_number_from_location(ctx, doc, location);
+                if (target < 0 || target >= pageCount)
+                    continue;
+
+                item.targetPage = target;
+
+                fz_rect targetRect = {0, 0, 0, 0};
+                if (!targetBounds.contains(target)) {
+                    if (pageBounds(target, &targetRect))
+                        targetBounds.insert(target, targetRect);
+                } else {
+                    targetRect = targetBounds.value(target);
+                }
+
+                const double w = targetRect.x1 - targetRect.x0;
+                const double h = targetRect.y1 - targetRect.y0;
+                if (w > 0 && h > 0 && std::isfinite(xp) && std::isfinite(yp)) {
+                    item.target = QPointF(
+                        (xp - targetRect.x0) / w,
+                        (yp - targetRect.y0) / h
+                    );
+                    item.hasTarget = true;
+                }
+
+                result.append(item);
+            }
+
+            ok = true;
+        }
+        fz_always(ctx) {
+            if (links)
+                fz_drop_link(ctx, links);
+            if (page)
+                fz_drop_page(ctx, page);
+        }
+        fz_catch(ctx) {
+            ok = false;
+        }
+
+        if (ok)
+            emit linksLoaded(result, pageIndex, id);
+    }
+
+    // Returns the page's bounds, or false if the page cannot be loaded.
+    bool pageBounds(int pageIndex, fz_rect *bounds)
+    {
+        fz_page *volatile page = nullptr;
+        volatile bool ok = false;
+
+        fz_try(ctx) {
+            page = fz_load_page(ctx, doc, pageIndex);
+            *bounds = fz_bound_page(ctx, page);
+            ok = true;
+        }
+        fz_always(ctx) {
+            if (page)
+                fz_drop_page(ctx, page);
+        }
+        fz_catch(ctx) {
+            ok = false;
+        }
+
+        return ok;
     }
 
     void dropDisplayList()
@@ -410,6 +549,9 @@ signals:
 
     void errorOccurred(const QString &message);
 
+    void linksLoaded(const QList<PageLink> &links, int pageIndex,
+                     quint64 requestId);
+
 private:
     fz_context *ctx = nullptr;
     fz_document *doc = nullptr;
@@ -438,6 +580,31 @@ public:
 
         setDragMode(QGraphicsView::ScrollHandDrag);
         setFrameShape(QFrame::NoFrame);
+
+        // Needed to report hover positions when no button is held.
+        setMouseTracking(true);
+    }
+
+    // Shows a pointing hand over links. Pencil mode and middle-button
+    // panning keep their own cursors.
+    void setLinkCursor(bool on)
+    {
+        if (m_linkCursor == on)
+            return;
+
+        m_linkCursor = on;
+
+        if (m_pencilMode || middlePanning)
+            return;
+
+        // The cursor must be set on the viewport: it is the child widget
+        // that receives the mouse and shows the open-hand pan cursor.
+        if (on)
+            viewport()->setCursor(Qt::PointingHandCursor);
+        else if (dragMode() == QGraphicsView::ScrollHandDrag)
+            viewport()->setCursor(Qt::OpenHandCursor);
+        else
+            viewport()->unsetCursor();
     }
 
     ~PdfCanvas() override
@@ -630,6 +797,8 @@ signals:
     void pencilModeChanged(bool enabled);
     void viewportResized();
     void strokesChanged();
+    void linkClicked(const QPointF &scenePos);
+    void hovered(const QPointF &scenePos);
 
 protected:
     void resizeEvent(QResizeEvent *event) override
@@ -702,6 +871,11 @@ protected:
             return;
         }
 
+        if (event->button() == Qt::LeftButton) {
+            m_clickStart = event->position().toPoint();
+            m_clickPending = true;
+        }
+
         QGraphicsView::mousePressEvent(event);
     }
 
@@ -736,6 +910,7 @@ protected:
             return;
         }
 
+        emit hovered(mapToScene(event->position().toPoint()));
         QGraphicsView::mouseMoveEvent(event);
     }
 
@@ -763,6 +938,15 @@ protected:
             return;
         }
 
+        if (event->button() == Qt::LeftButton && m_clickPending) {
+            m_clickPending = false;
+
+            // A press that barely moved is a click, not a pan.
+            const QPoint moved = event->position().toPoint() - m_clickStart;
+            if (!m_pencilMode && moved.manhattanLength() < 4)
+                emit linkClicked(mapToScene(event->position().toPoint()));
+        }
+
         QGraphicsView::mouseReleaseEvent(event);
     }
 
@@ -770,6 +954,9 @@ private:
     bool m_pencilMode = false;
     bool m_drawing = false;
     bool middlePanning = false;
+    bool m_clickPending = false;
+    QPoint m_clickStart;
+    bool m_linkCursor = false;
 
     int m_currentPage = 0;
     QPoint lastMousePosition;
@@ -1493,6 +1680,8 @@ public:
         renderTimer.setSingleShot(true);
         renderTimer.setInterval(120);
 
+        qRegisterMetaType<QList<PageLink>>();
+
         worker = new PdfWorker;
         worker->moveToThread(&renderThread);
 
@@ -1513,6 +1702,20 @@ public:
 
         connect(worker, &PdfWorker::openFailed,
                 this, &MainWindow::onOpenFailed);
+
+        connect(this, &MainWindow::linksRequested,
+                worker, &PdfWorker::loadLinks);
+
+        connect(worker, &PdfWorker::linksLoaded,
+                this, &MainWindow::onLinksLoaded);
+
+        connect(canvas, &PdfCanvas::linkClicked,
+                this, &MainWindow::onLinkClicked);
+
+        connect(canvas, &PdfCanvas::hovered,
+                this, &MainWindow::onCanvasHovered);
+
+        qApp->installEventFilter(this);
 
         connect(&renderTimer, &QTimer::timeout,
                 this, &MainWindow::requestRender);
@@ -1660,6 +1863,7 @@ public:
 
     ~MainWindow() override
     {
+        qApp->removeEventFilter(this);
         renderTimer.stop();
 
         if (renderThread.isRunning()) {
@@ -1692,6 +1896,8 @@ signals:
         double scale,
         quint64 requestId
     );
+
+    void linksRequested(int page, quint64 requestId);
 
 private slots:
     void choosePdf()
@@ -1732,6 +1938,10 @@ private slots:
         canvas->clearAnnotations();
         navItem = nullptr;
         hasPendingFocus = false;
+        hasPendingPan = false;
+        linkPage = -1;
+        pageLinks.clear();
+        ++linkRequestId;
         pageItem->setPixmap(QPixmap());
         canvas->resetTransform();
         scene->setSceneRect(QRectF());
@@ -1796,6 +2006,25 @@ private slots:
             qBound(0.15, renderScale, 8.0),
             id
         );
+
+        // Links depend only on the page, so they are read once per page.
+        if (currentPage != linkPage) {
+            linkPage = currentPage;
+            pageLinks.clear();
+            emit linksRequested(currentPage, ++linkRequestId);
+        }
+    }
+
+    void onLinksLoaded(
+        const QList<PageLink> &links,
+        int page,
+        quint64 id
+    )
+    {
+        if (id != linkRequestId || page != currentPage)
+            return;
+
+        pageLinks = links;
     }
 
     void onPageRendered(
@@ -1858,6 +2087,12 @@ private slots:
         if (hasPendingFocus && !fitOnNextRender) {
             hasPendingFocus = false;
             applyFocus(pendingFocusRect);
+        }
+
+        // Same for a link that jumps to a point on its target page.
+        if (hasPendingPan && !fitOnNextRender) {
+            hasPendingPan = false;
+            panToNormalized(pendingPanCenter);
         }
 
         // The thumbnail only depends on the page, not the zoom level.
@@ -2171,6 +2406,99 @@ private slots:
         canvas->zoomChanged(canvas->zoomLevel());
     }
 
+    // Returns the link under a scene position, or null if there is none.
+    const PageLink *linkAt(const QPointF &scenePos) const
+    {
+        if (pageLinks.isEmpty() || pageItem->pixmap().isNull())
+            return nullptr;
+
+        const QRectF page = pageItem->sceneBoundingRect();
+        if (page.isEmpty() || !page.contains(scenePos))
+            return nullptr;
+
+        const QPointF point(
+            (scenePos.x() - page.left()) / page.width(),
+            (scenePos.y() - page.top()) / page.height()
+        );
+
+        for (const PageLink &link : std::as_const(pageLinks)) {
+            if (link.rect.contains(point))
+                return &link;
+        }
+        return nullptr;
+    }
+
+    // Follows a link if the click landed on one.
+    void onLinkClicked(const QPointF &scenePos)
+    {
+        const PageLink *link = linkAt(scenePos);
+        if (!link)
+            return;
+
+        if (!link->uri.isEmpty())
+            openExternalLink(link->uri);
+        else if (link->targetPage >= 0)
+            followInternalLink(*link);
+    }
+
+    // Pointing hand over a link while Ctrl is held.
+    void onCanvasHovered(const QPointF &scenePos)
+    {
+        lastHoverPos = scenePos;
+        updateLinkCursor(
+            QGuiApplication::keyboardModifiers().testFlag(Qt::ControlModifier)
+        );
+    }
+
+    void updateLinkCursor(bool ctrlDown)
+    {
+        canvas->setLinkCursor(ctrlDown && linkAt(lastHoverPos) != nullptr);
+    }
+
+    // Ctrl can be pressed or released without the mouse moving, so the
+    // cursor is also updated from key events.
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::KeyPress
+                || event->type() == QEvent::KeyRelease) {
+            auto *key = static_cast<QKeyEvent *>(event);
+            if (key->key() == Qt::Key_Control && !key->isAutoRepeat())
+                updateLinkCursor(event->type() == QEvent::KeyPress);
+        }
+        return QMainWindow::eventFilter(watched, event);
+    }
+
+    void followInternalLink(const PageLink &link)
+    {
+        // Setting the same page number emits no change, so pan directly.
+        if (link.targetPage == currentPage) {
+            if (link.hasTarget)
+                panToNormalized(link.target);
+            return;
+        }
+
+        pendingPanCenter = link.target;
+        hasPendingPan = link.hasTarget;
+        pageNumber->setValue(link.targetPage + 1);
+    }
+
+    void openExternalLink(const QString &uri)
+    {
+        const QUrl url(uri, QUrl::TolerantMode);
+        const QString scheme = url.scheme().toLower();
+
+        // PDFs come from untrusted sources, so other schemes (file:, custom
+        // app handlers) are not opened.
+        if (scheme == "http" || scheme == "https" || scheme == "mailto") {
+            QDesktopServices::openUrl(url);
+        } else {
+            statusBar()->showMessage(
+                "Blocked link with unsupported scheme: " + scheme,
+                5000
+            );
+        }
+    }
+
     void redoStroke()
     {
         if (canvas->redoLastStroke())
@@ -2288,6 +2616,14 @@ private:
     QGraphicsPathItem *navItem = nullptr;
     QRectF pendingFocusRect;
     bool hasPendingFocus = false;
+
+    // Links on the current page, and the page they were read for.
+    QList<PageLink> pageLinks;
+    int linkPage = -1;
+    quint64 linkRequestId = 0;
+    QPointF pendingPanCenter;
+    bool hasPendingPan = false;
+    QPointF lastHoverPos;
 
     MiniMap *miniMap = nullptr;
 
