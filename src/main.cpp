@@ -3,6 +3,7 @@
 #include <QMainWindow>
 #include <QGraphicsView>
 #include <QGraphicsScene>
+#include <QGraphicsItem>
 #include <QGraphicsPixmapItem>
 #include <QGraphicsPathItem>
 #include <QPainterPath>
@@ -51,12 +52,6 @@
 #include <QGuiApplication>
 
 #include <mupdf/fitz.h>
-
-#include <QDockWidget>
-#include <QScrollArea>
-#include <QButtonGroup>
-#include <QSignalBlocker>
-#include <QMessageBox>
 
 #include <algorithm>
 #include <atomic>
@@ -107,16 +102,178 @@ QIcon themeIcon(const char *name, const QIcon &fallback = QIcon())
     return tintedIcon(icon.isNull() ? fallback : icon, color);
 }
 
-// Pencil line counters. Each stroke stores the id of its counter.
-constexpr int kCounterKey = 1;     // stroke data: counter id (-1 = none)
+void applyDarkTheme(QApplication &app)
+{
+    app.setStyle("Fusion");
+
+    QPalette palette;
+    palette.setColor(QPalette::Window, QColor("#191c21"));
+    palette.setColor(QPalette::WindowText, QColor("#e7e9ed"));
+    palette.setColor(QPalette::Base, QColor("#121519"));
+    palette.setColor(QPalette::AlternateBase, QColor("#20252b"));
+    palette.setColor(QPalette::ToolTipBase, QColor("#252b33"));
+    palette.setColor(QPalette::ToolTipText, QColor("#f1f3f5"));
+    palette.setColor(QPalette::Text, QColor("#e7e9ed"));
+    palette.setColor(QPalette::Button, QColor("#252a31"));
+    palette.setColor(QPalette::ButtonText, QColor("#e7e9ed"));
+    palette.setColor(QPalette::BrightText, QColor("#ffffff"));
+    palette.setColor(QPalette::Highlight, QColor("#bd5638"));
+    palette.setColor(QPalette::HighlightedText, QColor("#ffffff"));
+    palette.setColor(QPalette::PlaceholderText, QColor("#818a96"));
+    palette.setColor(QPalette::Disabled, QPalette::Text,
+                     QColor("#737b85"));
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText,
+                     QColor("#737b85"));
+    app.setPalette(palette);
+
+    app.setStyleSheet(R"(
+        QToolBar {
+            background: #20252b;
+            border: none;
+            border-bottom: 1px solid #343b44;
+            spacing: 6px;
+            padding: 7px 10px;
+        }
+        QToolBar::separator {
+            background: #3a424c;
+            width: 1px;
+            margin: 4px 5px;
+        }
+        QToolButton {
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 5px;
+            padding: 7px 9px;
+        }
+        QToolButton:hover, QPushButton:hover {
+            background: #303740;
+            border-color: #414a55;
+        }
+        QToolButton:checked {
+            background: #493026;
+            border-color: #8e4d35;
+        }
+        QPushButton {
+            background: #252a31;
+            border: 1px solid #3a424c;
+            border-radius: 5px;
+            padding: 8px 13px;
+        }
+        QPushButton#primaryButton {
+            background: #bd5638;
+            border-color: #bd5638;
+            color: #ffffff;
+            font-weight: 600;
+        }
+        QPushButton#primaryButton:hover {
+            background: #d06746;
+            border-color: #d06746;
+        }
+        QSpinBox, QLineEdit, QComboBox {
+            background: #15191e;
+            border: 1px solid #3a424c;
+            border-radius: 4px;
+            padding: 5px 7px;
+            selection-background-color: #bd5638;
+        }
+        QListWidget {
+            background: #15191e;
+            border: 1px solid #303740;
+            border-radius: 5px;
+            padding: 4px;
+            outline: none;
+        }
+        QListWidget::item {
+            padding: 11px 10px;
+            border-radius: 4px;
+        }
+        QListWidget::item:hover {
+            background: #252b32;
+        }
+        QListWidget::item:selected {
+            background: #493026;
+            color: #ffffff;
+        }
+        QStatusBar {
+            background: #20252b;
+            border-top: 1px solid #343b44;
+        }
+        QStatusBar::item {
+            border: none;
+        }
+        QScrollBar:vertical {
+            background: #191c21;
+            width: 11px;
+            margin: 0;
+        }
+        QScrollBar:horizontal {
+            background: #191c21;
+            height: 11px;
+            margin: 0;
+        }
+        QScrollBar::handle {
+            background: #4a535e;
+            border-radius: 4px;
+            min-width: 24px;
+            min-height: 24px;
+        }
+        QScrollBar::handle:hover {
+            background: #687482;
+        }
+        QScrollBar::add-line, QScrollBar::sub-line {
+            width: 0;
+            height: 0;
+        }
+        QMenu {
+            background: #252a31;
+            border: 1px solid #3a424c;
+            padding: 4px;
+        }
+        QMenu::item {
+            padding: 6px 24px 6px 10px;
+            border-radius: 3px;
+        }
+        QMenu::item:selected {
+            background: #493026;
+        }
+        QToolTip {
+            background: #252b33;
+            color: #f1f3f5;
+            border: 1px solid #414a55;
+            padding: 5px;
+        }
+        QLabel#homeTitle {
+            color: #f1f3f5;
+            font-size: 25px;
+            font-weight: 600;
+        }
+        QLabel#homeSubtitle {
+            color: #9da6b1;
+            font-size: 13px;
+        }
+        QLabel#sectionTitle {
+            color: #d4d8de;
+            font-size: 14px;
+            font-weight: 600;
+            padding-top: 12px;
+        }
+        QLabel#countTotal {
+            background: #2b3038;
+            border: 1px solid #444d58;
+            border-radius: 5px;
+            color: #f1f3f5;
+            font-weight: 600;
+            padding: 6px 10px;
+        }
+        QLabel#emptyState {
+            color: #929ba6;
+            padding: 24px;
+        }
+    )");
+}
+
 constexpr int kBaseWidthKey = 2;   // stroke data: pen width before highlight
 constexpr qreal kMinStrokePixels = 10.0;  // shorter pencil strokes are discarded
-
-struct CounterDef {
-    int id = -1;
-    QString name;
-    QColor color;
-};
 
 // A clickable area of a page. Positions are fractions (0 to 1) of the page
 // size, so they stay valid at any zoom level.
@@ -132,22 +289,66 @@ QColor defaultPenColor()
     return QColor("#ff6b35");
 }
 
-// Colors handed out to new counters, cycling after the last one.
-QColor counterPaletteColor(int index)
-{
-    static const QColor palette[] = {
-        QColor("#ff6b35"), QColor("#2a9d8f"), QColor("#e9c46a"),
-        QColor("#457b9d"), QColor("#9b5de5"), QColor("#06d6a0"),
-        QColor("#f15bb5"), QColor("#00bbf9"), QColor("#fee440"),
-        QColor("#8ac926"), QColor("#ff595e"), QColor("#6a4c93")
-    };
-    return palette[index % 12];
-}
-
 } // namespace
 
 // Qt needs this outside the anonymous namespace to pass PageLink in signals.
 Q_DECLARE_METATYPE(PageLink)
+
+class CountMarkerItem : public QGraphicsItem
+{
+public:
+    CountMarkerItem(int number, bool preview = false)
+        : m_number(number), m_preview(preview)
+    {
+        setFlag(QGraphicsItem::ItemIgnoresTransformations);
+        setAcceptedMouseButtons(Qt::NoButton);
+    }
+
+    QRectF boundingRect() const override
+    {
+        return QRectF(-17, -40, 34, 42);
+    }
+
+    void setNumber(int number)
+    {
+        if (m_number == number)
+            return;
+        m_number = number;
+        update();
+    }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override
+    {
+        painter->setRenderHint(QPainter::Antialiasing);
+        QColor fill("#bd5638");
+        if (m_preview)
+            fill.setAlpha(165);
+
+        QPainterPath pin;
+        pin.moveTo(-7, -16);
+        pin.lineTo(0, 0);
+        pin.lineTo(7, -16);
+        pin.closeSubpath();
+
+        QPen outline(QColor("#ffffff"), 1.5);
+        painter->setPen(outline);
+        painter->setBrush(fill);
+        painter->drawPath(pin);
+        painter->drawEllipse(QRectF(-13, -39, 26, 26));
+
+        painter->setPen(Qt::white);
+        QFont labelFont = painter->font();
+        labelFont.setBold(true);
+        labelFont.setPixelSize(m_number > 99 ? 9 : 11);
+        painter->setFont(labelFont);
+        painter->drawText(QRectF(-12, -38, 24, 24), Qt::AlignCenter,
+                          QString::number(m_number));
+    }
+
+private:
+    int m_number = 1;
+    bool m_preview = false;
+};
 
 // Maps a rectangle given in page coordinates to fractions of the page.
 QRectF normalizedRect(fz_rect rect, fz_rect bounds)
@@ -594,7 +795,7 @@ public:
 
         m_linkCursor = on;
 
-        if (m_pencilMode || middlePanning)
+        if (m_pencilMode || m_countMode || middlePanning)
             return;
 
         // The cursor must be set on the viewport: it is the child widget
@@ -623,8 +824,16 @@ public:
         return m_pencilMode;
     }
 
+    bool countMode() const
+    {
+        return m_countMode;
+    }
+
     void setPencilMode(bool enabled)
     {
+        if (enabled && m_countMode)
+            setCountMode(false);
+
         m_pencilMode = enabled;
         setDragMode(
             enabled
@@ -632,46 +841,82 @@ public:
                 : QGraphicsView::ScrollHandDrag
         );
 
-        if (enabled)
-            setCursor(Qt::CrossCursor);
-        else
-            unsetCursor();
+        updateInteractionCursor();
 
         emit pencilModeChanged(enabled);
+    }
+
+    void setCountMode(bool enabled)
+    {
+        if (enabled && m_pencilMode) {
+            m_pencilMode = false;
+            emit pencilModeChanged(false);
+        }
+
+        if (m_countMode == enabled)
+            return;
+
+        m_countMode = enabled;
+        setDragMode(enabled || m_pencilMode
+            ? QGraphicsView::NoDrag
+            : QGraphicsView::ScrollHandDrag);
+        if (enabled && !m_countPreview) {
+            m_countPreview = new CountMarkerItem(1, true);
+            m_countPreview->setZValue(30);
+            scene()->addItem(m_countPreview);
+        }
+
+        if (m_countPreview)
+            m_countPreview->setVisible(enabled);
+
+        updateInteractionCursor();
+        emit countModeChanged(enabled);
+    }
+
+    void updateCountPreview(const QPointF &scenePos)
+    {
+        if (!m_countMode || !m_countPreview)
+            return;
+
+        m_countPreview->setNumber(m_pageCounts.value(m_currentPage) + 1);
+        m_countPreview->setPos(scenePos);
+        m_countPreview->setVisible(scene()->sceneRect().contains(scenePos));
+    }
+
+    void clearCountMarkers()
+    {
+        for (auto it = m_countMarkers.begin(); it != m_countMarkers.end(); ++it) {
+            for (CountMarkerItem *marker : it.value()) {
+                scene()->removeItem(marker);
+                delete marker;
+            }
+        }
+        m_countMarkers.clear();
+        m_pageCounts.clear();
+        if (m_countPreview)
+            m_countPreview->setNumber(1);
+        emit countChanged(0);
     }
 
     void setCurrentPage(int page)
     {
         m_currentPage = page;
-
         for (auto it = m_annotations.begin();
              it != m_annotations.end(); ++it) {
             for (auto *item : it.value())
                 item->setVisible(it.key() == page);
         }
-    }
 
-    // Sets the counter and color used for strokes drawn from now on.
-    // A counter of -1 means the stroke is not counted.
-    void setPenCounter(int counter, const QColor &color)
-    {
-        m_penCounter = counter;
-        m_penColor = color;
-    }
-
-    // Every stroke in the document, in page order.
-    QList<QPair<int, QGraphicsPathItem *>> allStrokes() const
-    {
-        QList<int> pages = m_annotations.keys();
-        std::sort(pages.begin(), pages.end());
-
-        QList<QPair<int, QGraphicsPathItem *>> result;
-        for (int page : pages) {
-            for (QGraphicsPathItem *item : m_annotations.value(page))
-                result.append({page, item});
+        for (auto it = m_countMarkers.begin();
+             it != m_countMarkers.end(); ++it) {
+            for (CountMarkerItem *marker : it.value())
+                marker->setVisible(it.key() == page);
         }
 
-        return result;
+        if (m_countPreview)
+            m_countPreview->setVisible(false);
+
+        emit countChanged(m_pageCounts.value(m_currentPage));
     }
 
     // Removes the most recently drawn stroke. Returns false if none.
@@ -689,7 +934,6 @@ public:
         scene()->removeItem(last.second);
         m_redoStack.append(last);
 
-        emit strokesChanged();
         return true;
     }
 
@@ -705,7 +949,6 @@ public:
         m_annotations[stroke.first].append(stroke.second);
         m_strokeOrder.append(stroke);
 
-        emit strokesChanged();
         return true;
     }
 
@@ -747,15 +990,6 @@ public:
         m_redoStack.clear();
     }
 
-    // Stops counting the strokes of a removed counter; they stay drawn.
-    void untagCounter(int id)
-    {
-        for (const auto &entry : allStrokes()) {
-            if (entry.second->data(kCounterKey).toInt() == id)
-                entry.second->setData(kCounterKey, -1);
-        }
-    }
-
     // Draws one stroke thicker so the user can see which line is focused.
     void highlightStroke(QGraphicsPathItem *item)
     {
@@ -795,8 +1029,9 @@ public:
 signals:
     void zoomChanged(double zoom);
     void pencilModeChanged(bool enabled);
+    void countModeChanged(bool enabled);
+    void countChanged(int total);
     void viewportResized();
-    void strokesChanged();
     void linkClicked(const QPointF &scenePos);
     void hovered(const QPointF &scenePos);
 
@@ -854,7 +1089,6 @@ protected:
             );
 
             m_currentPathItem->setZValue(10);
-            m_currentPathItem->setData(kCounterKey, m_penCounter);
             m_currentPathItem->setData(kBaseWidthKey, pen.widthF());
             m_annotations[m_currentPage].append(m_currentPathItem);
             m_strokeOrder.append({m_currentPage, m_currentPathItem});
@@ -866,7 +1100,7 @@ protected:
         if (event->button() == Qt::MiddleButton) {
             middlePanning = true;
             lastMousePosition = event->position().toPoint();
-            setCursor(Qt::ClosedHandCursor);
+            updateInteractionCursor();
             event->accept();
             return;
         }
@@ -921,18 +1155,13 @@ protected:
             if (!isLongEnough(m_currentPathItem))
                 discardLastStroke();
             m_currentPathItem = nullptr;
-            emit strokesChanged();
             event->accept();
             return;
         }
 
         if (event->button() == Qt::MiddleButton && middlePanning) {
             middlePanning = false;
-
-            if (m_pencilMode)
-                setCursor(Qt::CrossCursor);
-            else
-                unsetCursor();
+            updateInteractionCursor();
 
             event->accept();
             return;
@@ -941,17 +1170,52 @@ protected:
         if (event->button() == Qt::LeftButton && m_clickPending) {
             m_clickPending = false;
 
-            // A press that barely moved is a click, not a pan.
             const QPoint moved = event->position().toPoint() - m_clickStart;
-            if (!m_pencilMode && moved.manhattanLength() < 4)
-                emit linkClicked(mapToScene(event->position().toPoint()));
+            if (moved.manhattanLength() < 4) {
+                const QPointF scenePos = mapToScene(event->position().toPoint());
+                if (m_countMode) {
+                    if (scene()->sceneRect().contains(scenePos)) {
+                        const int number = m_pageCounts.value(m_currentPage) + 1;
+                        m_pageCounts.insert(m_currentPage, number);
+                        auto *marker = new CountMarkerItem(number);
+                        marker->setPos(scenePos);
+                        marker->setZValue(20);
+                        scene()->addItem(marker);
+                        m_countMarkers[m_currentPage].append(marker);
+                        emit countChanged(number);
+                        updateCountPreview(scenePos);
+                    }
+                    event->accept();
+                    return;
+                }
+
+                if (!m_pencilMode)
+                    emit linkClicked(scenePos);
+            }
         }
 
         QGraphicsView::mouseReleaseEvent(event);
     }
 
 private:
+    void updateInteractionCursor()
+    {
+        if (m_countMode)
+            viewport()->setCursor(Qt::BlankCursor);
+        else if (middlePanning)
+            viewport()->setCursor(Qt::ClosedHandCursor);
+        else if (m_pencilMode)
+            viewport()->setCursor(Qt::CrossCursor);
+        else if (m_linkCursor)
+            viewport()->setCursor(Qt::PointingHandCursor);
+        else if (dragMode() == QGraphicsView::ScrollHandDrag)
+            viewport()->setCursor(Qt::OpenHandCursor);
+        else
+            viewport()->unsetCursor();
+    }
+
     bool m_pencilMode = false;
+    bool m_countMode = false;
     bool m_drawing = false;
     bool middlePanning = false;
     bool m_clickPending = false;
@@ -959,12 +1223,15 @@ private:
     bool m_linkCursor = false;
 
     int m_currentPage = 0;
+    QHash<int, int> m_pageCounts;
     QPoint lastMousePosition;
 
     QPainterPath m_currentPath;
     QGraphicsPathItem *m_currentPathItem = nullptr;
 
     QHash<int, QList<QGraphicsPathItem *>> m_annotations;
+    QHash<int, QList<CountMarkerItem *>> m_countMarkers;
+    CountMarkerItem *m_countPreview = nullptr;
 
     // Strokes in the order they were drawn, for undo.
     QList<QPair<int, QGraphicsPathItem *>> m_strokeOrder;
@@ -972,227 +1239,8 @@ private:
     // Undone strokes, kept off the scene so they can be redone.
     QList<QPair<int, QGraphicsPathItem *>> m_redoStack;
 
-    int m_penCounter = -1;
     QColor m_penColor = defaultPenColor();
     QGraphicsPathItem *m_highlighted = nullptr;
-};
-
-
-// Sidebar listing the pencil line counters, one row per counter.
-class CounterPanel : public QWidget
-{
-    Q_OBJECT
-
-public:
-    struct Row {
-        int id = -1;
-        int index = 0;          // position on the sidebar, 0-based
-        QString name;
-        QColor color;
-        int onPage = 0;
-        int total = 0;
-        int position = 0;       // 1-based number of the focused line, 0 if none
-    };
-
-    explicit CounterPanel(QWidget *parent = nullptr) : QWidget(parent)
-    {
-        auto *layout = new QVBoxLayout(this);
-        layout->setContentsMargins(8, 8, 8, 8);
-        layout->setSpacing(8);
-
-        auto *header = new QHBoxLayout;
-        auto *title = new QLabel("Counters", this);
-        QFont titleFont = title->font();
-        titleFont.setBold(true);
-        title->setFont(titleFont);
-        header->addWidget(title, 1);
-
-        m_removeButton = new QToolButton(this);
-        m_removeButton->setText("−");
-        m_removeButton->setToolTip(
-            "Remove the active counter (its lines stay but are not counted)"
-        );
-        connect(m_removeButton, &QToolButton::clicked,
-                this, &CounterPanel::removeRequested);
-        header->addWidget(m_removeButton);
-
-        auto *addButton = new QToolButton(this);
-        addButton->setText("+");
-        addButton->setToolTip("Add a counter (C)");
-        connect(addButton, &QToolButton::clicked,
-                this, &CounterPanel::addRequested);
-        header->addWidget(addButton);
-
-        layout->addLayout(header);
-
-        // Scope: count and step through all lines, or only this page's.
-        auto *scope = new QHBoxLayout;
-        m_documentButton = new QPushButton("Whole document", this);
-        m_pageButton = new QPushButton("This page", this);
-        for (QPushButton *button : {m_documentButton, m_pageButton}) {
-            button->setCheckable(true);
-            button->setCursor(Qt::PointingHandCursor);
-            scope->addWidget(button);
-        }
-        m_documentButton->setChecked(true);
-
-        auto *group = new QButtonGroup(this);
-        group->addButton(m_documentButton);
-        group->addButton(m_pageButton);
-        group->setExclusive(true);
-
-        connect(m_pageButton, &QPushButton::toggled,
-                this, &CounterPanel::scopeChanged);
-
-        layout->addLayout(scope);
-
-        m_container = new QWidget(this);
-        m_rows = new QVBoxLayout(m_container);
-        m_rows->setContentsMargins(0, 0, 0, 0);
-        m_rows->setSpacing(10);
-        m_rows->addStretch();
-
-        auto *scroll = new QScrollArea(this);
-        scroll->setWidget(m_container);
-        scroll->setWidgetResizable(true);
-        scroll->setFrameShape(QFrame::NoFrame);
-        layout->addWidget(scroll, 1);
-
-        // Shortcut legend: each key in its own box, aligned with its action.
-        const QList<QPair<QString, QString>> shortcuts = {
-            {"N", "Pencil on / off"},
-            {"1 – 9", "Select counter by sidebar position"},
-            {"[  ]", "Previous / next line of the active counter"},
-            {"C", "Add a counter"},
-            {"Ctrl+Z", "Undo last line"},
-            {"Ctrl+Y", "Redo last line"},
-            {"Esc", "Leave pencil mode"},
-        };
-
-        QString html = "<div style='margin-top: 6px;'><b>Shortcuts</b></div>"
-                       "<table cellspacing='4'>";
-        for (const auto &shortcut : shortcuts) {
-            html += QString(
-                "<tr><td style='white-space: nowrap;'>"
-                "<code style='border: 1px solid gray; border-radius: 3px;"
-                " padding: 0 4px;'>%1</code></td>"
-                "<td>%2</td></tr>"
-            ).arg(shortcut.first.toHtmlEscaped(), shortcut.second.toHtmlEscaped());
-        }
-        html += "</table>";
-
-        auto *legend = new QLabel(html, this);
-        legend->setTextFormat(Qt::RichText);
-        legend->setWordWrap(true);
-        layout->addWidget(legend);
-    }
-
-    void setPageScoped(bool on)
-    {
-        QSignalBlocker blocker(m_pageButton);
-        m_pageButton->setChecked(on);
-        m_documentButton->setChecked(!on);
-    }
-
-    void setRows(const QList<Row> &rows, int activeId, bool pageScoped)
-    {
-        // Keep the trailing stretch; replace everything before it.
-        while (m_rows->count() > 1) {
-            QLayoutItem *item = m_rows->takeAt(0);
-            if (QWidget *widget = item->widget())
-                widget->deleteLater();
-            delete item;
-        }
-
-        for (const Row &row : rows) {
-            m_rows->insertWidget(
-                m_rows->count() - 1,
-                buildRow(row, row.id == activeId, pageScoped)
-            );
-        }
-
-        m_removeButton->setEnabled(!rows.isEmpty());
-    }
-
-signals:
-    void counterSelected(int counter);
-    void stepRequested(int counter, int direction);
-    void addRequested();
-    void removeRequested();
-    void scopeChanged(bool pageScoped);
-
-private:
-    QWidget *buildRow(const Row &row, bool active, bool pageScoped)
-    {
-        const int id = row.id;
-
-        auto *box = new QWidget(m_container);
-        auto *layout = new QVBoxLayout(box);
-        layout->setContentsMargins(0, 0, 0, 0);
-        layout->setSpacing(4);
-
-        const QColor text = qGray(row.color.rgb()) > 160
-            ? QColor(Qt::black)
-            : QColor(Qt::white);
-        const QString border = active
-            ? "3px solid palette(text)"
-            : "3px solid transparent";
-
-        auto *select = new QPushButton(box);
-        select->setMinimumHeight(56);
-        select->setCursor(Qt::PointingHandCursor);
-        select->setStyleSheet(QString(
-            "QPushButton { background: %1; color: %2; border: %3;"
-            " border-radius: 8px; padding: 6px 10px; text-align: left; }"
-        ).arg(row.color.name(), text.name(), border));
-        const QString stats = pageScoped
-            ? QString("%1 on this page").arg(row.onPage)
-            : QString("%1 on this page · %2 total")
-                  .arg(row.onPage)
-                  .arg(row.total);
-        select->setText(QString("%1  %2\n%3")
-            .arg(row.index + 1)
-            .arg(row.name)
-            .arg(stats));
-        connect(select, &QPushButton::clicked, this, [this, id] {
-            emit counterSelected(id);
-        });
-        layout->addWidget(select);
-
-        auto *prev = new QToolButton(box);
-        prev->setText("‹");
-        prev->setEnabled(row.total > 0);
-        connect(prev, &QToolButton::clicked, this, [this, id] {
-            emit stepRequested(id, -1);
-        });
-
-        auto *next = new QToolButton(box);
-        next->setText("›");
-        next->setEnabled(row.total > 0);
-        connect(next, &QToolButton::clicked, this, [this, id] {
-            emit stepRequested(id, 1);
-        });
-
-        auto *label = new QLabel(box);
-        label->setAlignment(Qt::AlignCenter);
-        label->setText(row.position > 0
-            ? QString("%1 / %2").arg(row.position).arg(row.total)
-            : QString("%1 lines").arg(row.total));
-
-        auto *nav = new QHBoxLayout;
-        nav->addWidget(prev);
-        nav->addWidget(label, 1);
-        nav->addWidget(next);
-        layout->addLayout(nav);
-
-        return box;
-    }
-
-    QWidget *m_container = nullptr;
-    QVBoxLayout *m_rows = nullptr;
-    QToolButton *m_removeButton = nullptr;
-    QPushButton *m_documentButton = nullptr;
-    QPushButton *m_pageButton = nullptr;
 };
 
 
@@ -1209,13 +1257,22 @@ public:
         layout->setSpacing(16);
 
         auto *title = new QLabel("CanvasPDF", this);
+        title->setObjectName("homeTitle");
         QFont titleFont = title->font();
-        titleFont.setPointSize(titleFont.pointSize() + 10);
+        titleFont.setPointSize(25);
         titleFont.setBold(true);
         title->setFont(titleFont);
         layout->addWidget(title);
 
-        layout->addWidget(new QLabel("Recently opened", this));
+        auto *subtitle = new QLabel(
+            "A focused space for your documents.", this
+        );
+        subtitle->setObjectName("homeSubtitle");
+        layout->addWidget(subtitle);
+
+        auto *recentTitle = new QLabel("Recently opened", this);
+        recentTitle->setObjectName("sectionTitle");
+        layout->addWidget(recentTitle);
 
         m_list = new QListWidget(this);
         m_list->setIconSize(QSize(32, 32));
@@ -1235,15 +1292,17 @@ public:
             "No recent PDFs yet. Open one to get started.",
             this
         );
+        m_empty->setObjectName("emptyState");
         m_empty->setAlignment(Qt::AlignCenter);
         layout->addWidget(m_empty, 1);
 
         auto *openButton = new QPushButton(
             themeIcon("document-open",
                       style()->standardIcon(QStyle::SP_DialogOpenButton)),
-            "Open PDF...",
+            "Open PDF",
             this
         );
+        openButton->setObjectName("primaryButton");
         connect(openButton, &QPushButton::clicked,
                 this, &HomePage::openDialogRequested);
         layout->addWidget(openButton, 0, Qt::AlignLeft);
@@ -1535,6 +1594,7 @@ public:
         showHome();
 
         auto *toolbar = addToolBar("PDF Controls");
+        toolbar->setObjectName("mainToolbar");
         toolbar->setMovable(false);
         toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 
@@ -1585,42 +1645,32 @@ public:
 
         pencilAction->setCheckable(true);
 
-        // Line counters are niche, so they are off unless enabled here.
-        countersAction = toolbar->addAction(
-            themeIcon("view-list-details",
-                      appStyle->standardIcon(QStyle::SP_FileDialogDetailedView)),
-            "Counters"
+        countAction = toolbar->addAction(
+            themeIcon("mark-location",
+                  appStyle->standardIcon(QStyle::SP_DialogApplyButton)),
+            "Count"
         );
-        countersAction->setCheckable(true);
-        countersAction->setToolTip("Count pencil lines per page");
+        countAction->setCheckable(true);
+        countAction->setEnabled(false);
+        countAction->setToolTip("Place numbered ticks on the PDF (C)");
 
-        countersPanel = new CounterPanel(this);
-        countersDock = new QDockWidget("Counters", this);
-        countersDock->setFeatures(QDockWidget::NoDockWidgetFeatures);
-        countersDock->setWidget(countersPanel);
-        addDockWidget(Qt::RightDockWidgetArea, countersDock);
-        countersDock->hide();
+        connect(countAction, &QAction::triggered,
+            canvas, &PdfCanvas::setCountMode);
 
-        connect(countersAction, &QAction::triggered,
-                this, &MainWindow::setCountersEnabled);
+        clearMarkersAction = toolbar->addAction(
+            themeIcon("edit-clear",
+                      appStyle->standardIcon(QStyle::SP_DialogResetButton)),
+            "Clear Markers"
+        );
+        clearMarkersAction->setEnabled(false);
+        clearMarkersAction->setToolTip("Remove all placed markers");
+        connect(clearMarkersAction, &QAction::triggered,
+                canvas, &PdfCanvas::clearCountMarkers);
 
-        connect(countersPanel, &CounterPanel::counterSelected,
-                this, &MainWindow::selectCounter);
-
-        connect(countersPanel, &CounterPanel::stepRequested,
-                this, &MainWindow::navigate);
-
-        connect(countersPanel, &CounterPanel::addRequested,
-                this, &MainWindow::addCounter);
-
-        connect(countersPanel, &CounterPanel::scopeChanged,
-                this, &MainWindow::setPageScoped);
-
-        connect(countersPanel, &CounterPanel::removeRequested,
-                this, &MainWindow::removeActiveCounter);
-
-        connect(canvas, &PdfCanvas::strokesChanged,
-                this, &MainWindow::refreshCounters);
+        connect(canvas, &PdfCanvas::countChanged,
+            this, [this](int total) {
+            countTotalLabel->setText(QString("Page ticks: %1").arg(total));
+        });
 
         pageNumber = new QSpinBox(this);
         pageNumber->setMinimum(1);
@@ -1628,6 +1678,15 @@ public:
         pageNumber->setPrefix("Page ");
         pageNumber->setEnabled(false);
         toolbar->addWidget(pageNumber);
+
+        auto *toolbarSpacer = new QWidget(toolbar);
+        toolbarSpacer->setSizePolicy(QSizePolicy::Expanding,
+                         QSizePolicy::Preferred);
+        toolbar->addWidget(toolbarSpacer);
+
+        countTotalLabel = new QLabel("Page ticks: 0", toolbar);
+        countTotalLabel->setObjectName("countTotal");
+        toolbar->addWidget(countTotalLabel);
 
         zoomLabel = new QLabel("100%", this);
 
@@ -1761,6 +1820,18 @@ public:
             );
         });
 
+        connect(canvas, &PdfCanvas::countModeChanged,
+                this, [this](bool enabled) {
+            countAction->setChecked(enabled);
+            if (enabled)
+                pencilAction->setChecked(false);
+            statusBar()->showMessage(
+                enabled
+                    ? "Count mode: click the PDF to place the next numbered tick."
+                    : "Pan mode: drag with the left mouse button to move."
+            );
+        });
+
         connect(canvas, &PdfCanvas::zoomChanged,
                 this, [this](double zoom) {
             zoomLabel->setText(
@@ -1778,7 +1849,6 @@ public:
             if (pageCount > 0 && page != currentPage + 1) {
                 currentPage = page - 1;
                 canvas->setCurrentPage(currentPage);
-                refreshCounters();
                 fitOnNextRender = true;
                 renderTimer.start(0);
             }
@@ -1808,31 +1878,15 @@ public:
         });
 
         addShortcut(Qt::Key_Escape, [this] {
-            if (canvas->pencilMode())
+            if (canvas->countMode())
+                canvas->setCountMode(false);
+            else if (canvas->pencilMode())
                 canvas->setPencilMode(false);
         });
 
-        // Keyboard shortcuts for counting.
-        for (int i = 0; i < 9; ++i) {
-            addShortcut(static_cast<Qt::Key>(Qt::Key_1 + i), [this, i] {
-                if (countersEnabled)
-                    selectCounterAt(i);
-            });
-        }
-
-        addShortcut(Qt::Key_BracketRight, [this] {
-            if (countersEnabled)
-                navigate(activeCounterId, 1);
-        });
-
-        addShortcut(Qt::Key_BracketLeft, [this] {
-            if (countersEnabled)
-                navigate(activeCounterId, -1);
-        });
-
         addShortcut(Qt::Key_C, [this] {
-            if (countersEnabled)
-                addCounter();
+            if (countAction->isEnabled())
+                canvas->setCountMode(!canvas->countMode());
         });
 
         auto *undo = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Z), this);
@@ -1850,15 +1904,6 @@ public:
 
         renderThread.start();
 
-        addCounter();
-
-        pageScoped = QSettings().value("countersPageScoped", false).toBool();
-        countersPanel->setPageScoped(pageScoped);
-
-        const bool enabled =
-            QSettings().value("countersEnabled", false).toBool();
-        countersAction->setChecked(enabled);
-        setCountersEnabled(enabled);
     }
 
     ~MainWindow() override
@@ -1934,10 +1979,11 @@ private slots:
         fitOnNextRender = true;
         thumbnailPage = -1;
 
+        countAction->setEnabled(false);
+        canvas->setCountMode(false);
         canvas->setPencilMode(false);
+        canvas->clearCountMarkers();
         canvas->clearAnnotations();
-        navItem = nullptr;
-        hasPendingFocus = false;
         hasPendingPan = false;
         linkPage = -1;
         pageLinks.clear();
@@ -1984,7 +2030,6 @@ private slots:
 
         fitOnNextRender = true;
         renderTimer.start(0);
-        refreshCounters();
     }
 
     void requestRender()
@@ -2055,6 +2100,8 @@ private slots:
         );
 
         scene->setSceneRect(pageItem->sceneBoundingRect());
+        countAction->setEnabled(true);
+        clearMarkersAction->setEnabled(true);
 
         // The preview only shows the page while the full render is pending.
         if (preview)
@@ -2081,13 +2128,6 @@ private slots:
                 .arg(currentPage + 1)
                 .arg(pageCount)
         );
-
-        // Finish a line jump that waited for its page to render. Skip the
-        // fit pass so the jump lands at the final zoom.
-        if (hasPendingFocus && !fitOnNextRender) {
-            hasPendingFocus = false;
-            applyFocus(pendingFocusRect);
-        }
 
         // Same for a link that jumps to a point on its target page.
         if (hasPendingPan && !fitOnNextRender) {
@@ -2159,253 +2199,6 @@ private slots:
         );
     }
 
-    const CounterDef *findCounter(int id) const
-    {
-        for (const CounterDef &counter : counters) {
-            if (counter.id == id)
-                return &counter;
-        }
-        return nullptr;
-    }
-
-    void setCountersEnabled(bool enabled)
-    {
-        countersEnabled = enabled;
-        countersDock->setVisible(enabled);
-        applyPenCounter();
-        refreshCounters();
-        QSettings().setValue("countersEnabled", enabled);
-    }
-
-    void applyPenCounter()
-    {
-        const CounterDef *active = findCounter(activeCounterId);
-
-        if (countersEnabled && active)
-            canvas->setPenCounter(active->id, active->color);
-        else
-            canvas->setPenCounter(-1, defaultPenColor());
-    }
-
-    void addCounter()
-    {
-        CounterDef counter;
-        counter.id = nextCounterId++;
-        counter.name = QString("Counter %1").arg(counter.id);
-        counter.color = counterPaletteColor(static_cast<int>(counters.size()));
-        counters.append(counter);
-
-        activeCounterId = counter.id;
-        applyPenCounter();
-        refreshCounters();
-        statusBar()->showMessage(QString("Added %1.").arg(counter.name));
-    }
-
-    void removeActiveCounter()
-    {
-        const CounterDef *active = findCounter(activeCounterId);
-        if (!active)
-            return;
-
-        const int removedId = active->id;
-        const QString removedName = active->name;
-
-        int lines = 0;
-        for (const auto &entry : canvas->allStrokes()) {
-            if (entry.second->data(kCounterKey).toInt() == removedId)
-                ++lines;
-        }
-
-        if (lines > 0) {
-            const auto answer = QMessageBox::question(
-                this,
-                "Remove counter",
-                QString("Remove %1? Its %2 lines stay on the page but are "
-                        "no longer counted.").arg(removedName).arg(lines)
-            );
-            if (answer != QMessageBox::Yes)
-                return;
-        }
-
-        canvas->untagCounter(removedId);
-
-        for (int i = 0; i < counters.size(); ++i) {
-            if (counters.at(i).id == removedId) {
-                counters.removeAt(i);
-                break;
-            }
-        }
-
-        navItem = nullptr;
-        activeCounterId = counters.isEmpty() ? -1 : counters.first().id;
-        applyPenCounter();
-        refreshCounters();
-        statusBar()->showMessage(QString("Removed %1.").arg(removedName));
-    }
-
-    void selectCounter(int id)
-    {
-        if (!findCounter(id))
-            return;
-
-        activeCounterId = id;
-        applyPenCounter();
-        refreshCounters();
-    }
-
-    // Selects the counter at a sidebar position (0-based).
-    void selectCounterAt(int position)
-    {
-        if (position < counters.size())
-            selectCounter(counters.at(position).id);
-    }
-
-    // Lines of a counter in the current scope, in page order.
-    QList<QPair<int, QGraphicsPathItem *>> linesFor(int id) const
-    {
-        QList<QPair<int, QGraphicsPathItem *>> lines;
-        for (const auto &entry : canvas->allStrokes()) {
-            if (entry.second->data(kCounterKey).toInt() != id)
-                continue;
-            if (pageScoped && entry.first != currentPage)
-                continue;
-            lines.append(entry);
-        }
-        return lines;
-    }
-
-    void setPageScoped(bool on)
-    {
-        pageScoped = on;
-        QSettings().setValue("countersPageScoped", on);
-        refreshCounters();
-    }
-
-    // Recomputes the sidebar numbers for the current scope.
-    void refreshCounters()
-    {
-        QHash<int, QList<QGraphicsPathItem *>> lines;
-        QHash<int, int> onPage;
-        bool navAlive = false;
-
-        for (const auto &entry : canvas->allStrokes()) {
-            QGraphicsPathItem *stroke = entry.second;
-            if (stroke == navItem)
-                navAlive = true;
-
-            const int id = stroke->data(kCounterKey).toInt();
-            if (id < 0)
-                continue;
-
-            const bool here = entry.first == currentPage;
-            if (here)
-                ++onPage[id];
-            if (!pageScoped || here)
-                lines[id].append(stroke);
-        }
-
-        if (!navAlive)
-            navItem = nullptr;
-
-        QList<CounterPanel::Row> rows;
-        for (int i = 0; i < counters.size(); ++i) {
-            const CounterDef &counter = counters.at(i);
-            const QList<QGraphicsPathItem *> &ids = lines[counter.id];
-
-            CounterPanel::Row row;
-            row.id = counter.id;
-            row.index = i;
-            row.name = counter.name;
-            row.color = counter.color;
-            row.onPage = onPage.value(counter.id);
-            row.total = ids.size();
-
-            const int index = ids.indexOf(navItem);
-            row.position = index >= 0 ? index + 1 : 0;
-
-            rows.append(row);
-        }
-
-        countersPanel->setRows(rows, activeCounterId, pageScoped);
-    }
-
-    // Steps to the next (direction > 0) or previous line of a counter,
-    // across all pages, wrapping at the ends.
-    void navigate(int id, int direction)
-    {
-        if (!findCounter(id))
-            return;
-
-        const CounterDef *counter = findCounter(id);
-
-        const auto lines = linesFor(id);
-
-        if (lines.isEmpty()) {
-            statusBar()->showMessage(
-                QString("%1 has no lines yet. Draw with the pencil.")
-                    .arg(counter->name)
-            );
-            return;
-        }
-
-        int current = -1;
-        for (int i = 0; i < lines.size(); ++i) {
-            if (lines.at(i).second == navItem)
-                current = i;
-        }
-
-        const int count = lines.size();
-        const int next = direction > 0
-            ? (current + 1) % count
-            : (current <= 0 ? count - 1 : current - 1);
-
-        navItem = lines.at(next).second;
-        canvas->highlightStroke(navItem);
-
-        const int page = lines.at(next).first;
-        focusOnStroke(page, navItem->sceneBoundingRect());
-
-        statusBar()->showMessage(
-            QString("%1 · line %2 of %3 · page %4")
-                .arg(counter->name)
-                .arg(next + 1)
-                .arg(count)
-                .arg(page + 1)
-        );
-
-        refreshCounters();
-    }
-
-    // Shows a scene rectangle, switching pages first if needed.
-    void focusOnStroke(int page, const QRectF &rect)
-    {
-        if (page == currentPage) {
-            applyFocus(rect);
-            return;
-        }
-
-        pendingFocusRect = rect;
-        hasPendingFocus = true;
-        pageNumber->setValue(page + 1);
-    }
-
-    // Zooms so the rectangle fills about a third of the view, centered.
-    void applyFocus(const QRectF &rect)
-    {
-        const QSizeF view = canvas->viewport()->size();
-
-        const qreal fitWidth =
-            view.width() / qMax(rect.width() * 3.0, 60.0);
-        const qreal fitHeight =
-            view.height() / qMax(rect.height() * 3.0, 60.0);
-        const qreal zoom = qBound(0.5, qMin(fitWidth, fitHeight), 4.0);
-
-        canvas->resetTransform();
-        canvas->scale(zoom, zoom);
-        canvas->centerOn(rect.center());
-        canvas->zoomChanged(canvas->zoomLevel());
-    }
-
     // Returns the link under a scene position, or null if there is none.
     const PageLink *linkAt(const QPointF &scenePos) const
     {
@@ -2445,6 +2238,10 @@ private slots:
     void onCanvasHovered(const QPointF &scenePos)
     {
         lastHoverPos = scenePos;
+        if (canvas->countMode()) {
+            canvas->updateCountPreview(scenePos);
+            return;
+        }
         updateLinkCursor(
             QGuiApplication::keyboardModifiers().testFlag(Qt::ControlModifier)
         );
@@ -2616,18 +2413,6 @@ private:
     QStackedWidget *stack = nullptr;
     HomePage *homePage = nullptr;
 
-    CounterPanel *countersPanel = nullptr;
-    QDockWidget *countersDock = nullptr;
-    QAction *countersAction = nullptr;
-    bool countersEnabled = false;
-    bool pageScoped = false;
-    QList<CounterDef> counters;
-    int nextCounterId = 1;
-    int activeCounterId = -1;
-    QGraphicsPathItem *navItem = nullptr;
-    QRectF pendingFocusRect;
-    bool hasPendingFocus = false;
-
     // Links on the current page, and the page they were read for.
     QList<PageLink> pageLinks;
     int linkPage = -1;
@@ -2640,7 +2425,10 @@ private:
 
     QSpinBox *pageNumber = nullptr;
     QLabel *zoomLabel = nullptr;
+    QLabel *countTotalLabel = nullptr;
     QAction *pencilAction = nullptr;
+    QAction *countAction = nullptr;
+    QAction *clearMarkersAction = nullptr;
 
     QThread renderThread;
     PdfWorker *worker = nullptr;
@@ -2660,6 +2448,7 @@ private:
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
+    applyDarkTheme(app);
 
     // QSettings uses these names to store the recent-files list.
     QCoreApplication::setOrganizationName("CanvasPDF");
