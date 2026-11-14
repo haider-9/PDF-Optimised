@@ -2490,7 +2490,18 @@ private slots:
         // PDFs come from untrusted sources, so other schemes (file:, custom
         // app handlers) are not opened.
         if (scheme == "http" || scheme == "https" || scheme == "mailto") {
-            QDesktopServices::openUrl(url);
+            // Confirm first: the link came from the document, not the user.
+            const auto answer = QMessageBox::question(
+                this,
+                "Open link?",
+                "This PDF wants to open:\n\n" + url.toDisplayString()
+                    + "\n\nOpen it in your browser?",
+                QMessageBox::Open | QMessageBox::Cancel,
+                QMessageBox::Cancel
+            );
+
+            if (answer == QMessageBox::Open)
+                QDesktopServices::openUrl(url);
         } else {
             statusBar()->showMessage(
                 "Blocked link with unsupported scheme: " + scheme,
