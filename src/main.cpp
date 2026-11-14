@@ -5,6 +5,7 @@
 #include <QGraphicsScene>
 #include <QGraphicsItem>
 #include <QGraphicsPixmapItem>
+#include <QStyleOptionGraphicsItem>
 #include <QGraphicsPathItem>
 #include <QPainterPath>
 #include <QPainter>
@@ -275,6 +276,18 @@ void applyDarkTheme(QApplication &app)
 constexpr int kBaseWidthKey = 2;   // stroke data: pen width before highlight
 constexpr qreal kMinStrokePixels = 10.0;  // shorter pencil strokes are discarded
 
+// The full-size render of a page is made at this zoom (times the screen's
+// pixel ratio). It is kept, and zooming above fit shows it at once. Zooming
+// well past this level will look soft, because it is not re-rendered.
+constexpr double kFixedZoom = 4.0;
+// Below fit, a smaller bitmap is rendered at this many times the zoom.
+constexpr double kZoomHeadroom = 2.0;
+// A smaller bitmap is kept while it is at most this many times larger than
+// the zoom needs (zooming out), before a smaller one is rendered.
+constexpr double kMaxOversample = 3.0;
+// Number of parsed pages kept ready for fast re-rendering.
+constexpr int kDisplayListCacheSize = 16;
+
 // A clickable area of a page. Positions are fractions (0 to 1) of the page
 // size, so they stay valid at any zoom level.
 struct PageLink {
@@ -430,7 +443,8 @@ public slots:
         if (!ctx)
             return;
 
-        dropDisplayList();
+        prefetchQueue.clear();
+        dropDisplayLists();
 
         if (doc) {
             fz_drop_document(ctx, doc);
@@ -449,7 +463,8 @@ public slots:
         m_cookie.abort = 1;
     }
 
-    void renderPage(int pageIndex, double requestedScale, quint64 id)
+    void renderPage(int pageIndex, double requestedScale, quint64 id,
+                    bool wantPreview)
     {
         if (id != latestRequest.load() || !ctx || !doc)
             return;
@@ -459,23 +474,28 @@ public slots:
 
         m_cookie.abort = 0;
 
-        // Progressive render: a quarter-size preview appears quickly, then
-        // the full-resolution render replaces it. Each pass checks whether
-        // a newer request has arrived, so stale work stops early.
+        // Progressive render: when the page has nothing sharp on screen yet,
+        // a quarter-size preview appears quickly, then the full-resolution
+        // render replaces it. Each pass checks whether a newer request has
+        // arrived, so stale work stops early.
         const double finalScale = qBound(0.15, requestedScale, 8.0);
-        renderPass(pageIndex, finalScale * 0.5, id, true);
+        if (wantPreview) {
+            renderPass(pageIndex, finalScale * 0.5, id, true);
 
-        if (id != latestRequest.load() || m_cookie.abort != 0)
-            return;
+            if (id != latestRequest.load() || m_cookie.abort != 0)
+                return;
+        }
 
-        // The preview is on screen, so parse the page now. Later zooms only
-        // rasterize from the list.
-        buildDisplayList(pageIndex);
+        // Parsing the page is done once; later zooms only rasterize.
+        displayListFor(pageIndex);
 
         if (id != latestRequest.load() || m_cookie.abort != 0)
             return;
 
         renderPass(pageIndex, finalScale, id, false);
+
+        // Parse the neighbouring pages while the user looks at this one.
+        schedulePrefetch(pageIndex);
     }
 
     // Reads the clickable links of a page. Positions are returned as
@@ -585,47 +605,102 @@ public slots:
         return ok;
     }
 
-    void dropDisplayList()
+    void dropDisplayLists()
     {
-        if (displayList) {
-            fz_drop_display_list(ctx, displayList);
-            displayList = nullptr;
-        }
-        displayListPage = -1;
+        for (fz_display_list *list : displayLists)
+            fz_drop_display_list(ctx, list);
+
+        displayLists.clear();
+        displayListOrder.clear();
     }
 
-    // Parses a page once into a display list. Rasterizing from the list is
-    // much faster than re-reading the page content for every zoom level.
-    bool buildDisplayList(int pageIndex)
+    // Returns the parsed page, building it if needed. Rasterizing from a
+    // display list is much faster than re-reading the page content for every
+    // zoom level. Returns nullptr if the page cannot be parsed.
+    fz_display_list *displayListFor(int pageIndex)
     {
-        if (displayList && displayListPage == pageIndex)
-            return true;
-
-        dropDisplayList();
+        if (fz_display_list *cached = displayLists.value(pageIndex, nullptr)) {
+            // Move the page to the most recently used end.
+            displayListOrder.removeAll(pageIndex);
+            displayListOrder.append(pageIndex);
+            return cached;
+        }
 
         fz_page *volatile page = nullptr;
-        fz_display_list *volatile list = nullptr;
-        volatile bool ok = false;
+        fz_display_list *volatile built = nullptr;
 
         fz_try(ctx) {
             page = fz_load_page(ctx, doc, pageIndex);
-            list = fz_new_display_list_from_page(ctx, page);
-            ok = true;
+            built = fz_new_display_list_from_page(ctx, page);
         }
         fz_always(ctx) {
             if (page)
                 fz_drop_page(ctx, page);
         }
         fz_catch(ctx) {
-            ok = false;
+            built = nullptr;
         }
 
-        if (ok && list) {
-            displayList = list;
-            displayListPage = pageIndex;
+        fz_display_list *list = built;
+        if (!list)
+            return nullptr;
+
+        // Keep the cache small: drop the least recently used page first.
+        while (displayListOrder.size() >= kDisplayListCacheSize) {
+            const int oldest = displayListOrder.takeFirst();
+            fz_drop_display_list(ctx, displayLists.take(oldest));
         }
 
-        return ok && list;
+        displayLists.insert(pageIndex, list);
+        displayListOrder.append(pageIndex);
+        return list;
+    }
+
+    // Parses the pages around the one on screen, one page per queued step,
+    // so pending render requests always run first. Neighbours are read in
+    // order of distance from the current page. The window fits in the cache
+    // (the current page plus two windows of neighbours), so the pages near
+    // the user are never evicted by their own prefetch.
+    void schedulePrefetch(int centerPage)
+    {
+        prefetchQueue.clear();
+
+        for (int distance = 1; distance <= kDisplayListCacheSize / 2 - 1;
+             ++distance) {
+            for (int page : {centerPage + distance, centerPage - distance}) {
+                if (page >= 0 && page < pageCount)
+                    prefetchQueue.append(page);
+            }
+        }
+
+        if (!prefetchRunning) {
+            prefetchRunning = true;
+            QMetaObject::invokeMethod(this, [this] { prefetchStep(); },
+                                      Qt::QueuedConnection);
+        }
+    }
+
+    void prefetchStep()
+    {
+        prefetchRunning = false;
+
+        if (!ctx || !doc)
+            return;
+
+        // Skip pages that are already parsed, then build the next one.
+        while (!prefetchQueue.isEmpty()) {
+            const int page = prefetchQueue.takeFirst();
+            if (!displayLists.contains(page)) {
+                displayListFor(page);
+                break;
+            }
+        }
+
+        if (!prefetchQueue.isEmpty()) {
+            prefetchRunning = true;
+            QMetaObject::invokeMethod(this, [this] { prefetchStep(); },
+                                      Qt::QueuedConnection);
+        }
     }
 
     // Draws one page at a scale into a buffer owned by the emitted image.
@@ -644,12 +719,14 @@ public slots:
         fz_display_list *list = nullptr;
         volatile bool ok = false;
 
+        // Use the parsed page when it is already available. A preview does
+        // not wait for the parse; the final pass parses first.
+        list = displayLists.value(pageIndex, nullptr);
+
         fz_try(ctx) {
             fz_rect bounds = {0, 0, 0, 0};
 
-            // Use the cached display list when this page has one.
-            if (displayList && displayListPage == pageIndex) {
-                list = displayList;
+            if (list) {
                 bounds = fz_bound_display_list(ctx, list);
             } else {
                 page = fz_load_page(ctx, doc, pageIndex);
@@ -757,8 +834,11 @@ private:
     fz_context *ctx = nullptr;
     fz_document *doc = nullptr;
     fz_cookie m_cookie{};
-    fz_display_list *displayList = nullptr;   // parsed page, reused by zooms
-    int displayListPage = -1;
+    // Parsed pages, reused by zooms. Oldest first in displayListOrder.
+    QHash<int, fz_display_list *> displayLists;
+    QList<int> displayListOrder;
+    QList<int> prefetchQueue;
+    bool prefetchRunning = false;
     int pageCount = 0;
 };
 
@@ -1557,6 +1637,38 @@ private:
 };
 
 
+// Shows one rendered page. It draws the page's QImage directly, so the
+// pixels are kept once instead of being copied into a QPixmap.
+class PageImageItem : public QGraphicsItem
+{
+public:
+    void setImage(const QImage &image)
+    {
+        prepareGeometryChange();
+        m_image = image;
+        update();
+    }
+
+    const QImage &image() const
+    {
+        return m_image;
+    }
+
+    QRectF boundingRect() const override
+    {
+        return QRectF(0, 0, m_image.width(), m_image.height());
+    }
+
+    void paint(QPainter *painter, const QStyleOptionGraphicsItem *,
+               QWidget *) override
+    {
+        painter->drawImage(0, 0, m_image);
+    }
+
+private:
+    QImage m_image;
+};
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -1575,8 +1687,8 @@ public:
         scene = new QGraphicsScene(this);
         canvas = new PdfCanvas(scene, this);
 
-        pageItem = scene->addPixmap(QPixmap());
-        pageItem->setTransformationMode(Qt::SmoothTransformation);
+        pageItem = new PageImageItem;
+        scene->addItem(pageItem);
 
         // The start page and the PDF canvas share the central area.
         homePage = new HomePage(this);
@@ -1939,7 +2051,8 @@ signals:
     void renderRequested(
         int page,
         double scale,
-        quint64 requestId
+        quint64 requestId,
+        bool preview
     );
 
     void linksRequested(int page, quint64 requestId);
@@ -1988,7 +2101,11 @@ private slots:
         linkPage = -1;
         pageLinks.clear();
         ++linkRequestId;
-        pageItem->setPixmap(QPixmap());
+        pageItem->setImage(QImage());
+        shownPage = -1;
+        shownScale = 0.0;
+        fullImage = QImage();
+        fullPage = -1;
         canvas->resetTransform();
         scene->setSceneRect(QRectF());
         updateMiniMapThumbnail();
@@ -2043,16 +2160,100 @@ private slots:
         // The previous zoom level is stale now: stop rendering it.
         worker->cancelRender();
 
+        const double zoom = canvas->zoomLevel();
         const double dpr = devicePixelRatioF();
-        const double renderScale = canvas->zoomLevel() * dpr;
+        const double fullScale = fixedRenderScale();
+        const bool aboveFit = zoom >= fitZoom() * 0.999;
+
+        if (!fitOnNextRender && aboveFit && fullPage == currentPage) {
+            // At fit or beyond: show the kept full-size bitmap at once.
+            if (shownPage != currentPage
+                || !qFuzzyCompare(shownScale, fullScale)) {
+                showPageImage(fullImage, fullImageScale,
+                              fullPixelX, fullPixelY);
+                shownPage = currentPage;
+                shownScale = fullScale;
+            }
+
+            updateLinksForCurrentPage();
+            return;
+        }
+
+        if (!fitOnNextRender && !aboveFit) {
+            // Below fit a smaller bitmap is enough. Keep one that is sharp.
+            const double neededScale = qBound(0.15, zoom * dpr, 8.0);
+            const double targetScale =
+                qMin(neededScale * kZoomHeadroom, fullScale);
+            const double sharpMinimum = qMin(neededScale, fullScale);
+
+            const bool sharpEnough =
+                shownPage == currentPage
+                && shownScale > 0
+                && shownScale >= sharpMinimum * 0.999
+                && shownScale <= targetScale * kMaxOversample;
+
+            if (sharpEnough) {
+                updateLinksForCurrentPage();
+                return;
+            }
+
+            requestedScale = targetScale;
+        } else {
+            // At fit or beyond, with no kept bitmap yet: render full size.
+            requestedScale = fullScale;
+        }
+
+        // A quick preview is only useful when nothing sharp is on screen.
+        const bool wantPreview = shownPage != currentPage;
 
         emit renderRequested(
             currentPage,
-            qBound(0.15, renderScale, 8.0),
-            id
+            requestedScale,
+            id,
+            wantPreview
         );
 
-        // Links depend only on the page, so they are read once per page.
+        updateLinksForCurrentPage();
+    }
+
+    // Device pixels per page point of the full-size render.
+    double fixedRenderScale() const
+    {
+        return qBound(0.15, devicePixelRatioF() * kFixedZoom, 8.0);
+    }
+
+    // The zoom at which the whole page fits the window.
+    double fitZoom()
+    {
+        const QSizeF page =
+            pageItem->mapRectToScene(pageItem->boundingRect()).size();
+        const QSizeF view = canvas->viewport()->size();
+
+        if (page.isEmpty())
+            return 0.0;
+
+        return qMin(view.width() / page.width(),
+                    view.height() / page.height());
+    }
+
+    // Puts a rendered page on screen at the scale it was rendered at.
+    void showPageImage(const QImage &image, double renderScale,
+                       int pixelX, int pixelY)
+    {
+        pageItem->setImage(image);
+
+        QTransform imageTransform;
+        imageTransform.scale(1.0 / renderScale, 1.0 / renderScale);
+
+        pageItem->setTransform(imageTransform);
+        pageItem->setPos(pixelX / renderScale, pixelY / renderScale);
+
+        scene->setSceneRect(pageItem->sceneBoundingRect());
+    }
+
+    // Links depend only on the page, so they are read once per page.
+    void updateLinksForCurrentPage()
+    {
         if (currentPage != linkPage) {
             linkPage = currentPage;
             pageLinks.clear();
@@ -2085,21 +2286,26 @@ private slots:
         if (id != requestId || page != currentPage)
             return;
 
-        pageItem->setPixmap(QPixmap::fromImage(image));
+        // A preview would replace a sharp render of this page with a blurrier
+        // one, so it is ignored once the page is already shown.
+        if (preview && shownPage == page && shownScale > 0)
+            return;
 
-        QTransform imageTransform;
-        imageTransform.scale(
-            1.0 / renderScale,
-            1.0 / renderScale
-        );
+        showPageImage(image, renderScale, pixelX, pixelY);
+        shownPage = page;
+        // The requested scale is what the render aims for; a preview is
+        // never considered sharp.
+        shownScale = preview ? 0.0 : requestedScale;
 
-        pageItem->setTransform(imageTransform);
-        pageItem->setPos(
-            pixelX / renderScale,
-            pixelY / renderScale
-        );
+        // Keep the full-size bitmap, so zooming back above fit is instant.
+        if (!preview && qFuzzyCompare(requestedScale, fixedRenderScale())) {
+            fullImage = image;
+            fullPage = page;
+            fullImageScale = renderScale;
+            fullPixelX = pixelX;
+            fullPixelY = pixelY;
+        }
 
-        scene->setSceneRect(pageItem->sceneBoundingRect());
         countAction->setEnabled(true);
         clearMarkersAction->setEnabled(true);
 
@@ -2144,17 +2350,17 @@ private slots:
 
     void updateMiniMapThumbnail()
     {
-        const QPixmap page = pageItem->pixmap();
+        const QImage &page = pageItem->image();
 
         QPixmap thumbnail;
         if (!page.isNull()) {
             thumbnailPage = currentPage;
-            thumbnail = page.scaled(
+            thumbnail = QPixmap::fromImage(page.scaled(
                 480,
                 480,
                 Qt::KeepAspectRatio,
                 Qt::SmoothTransformation
-            );
+            ));
         }
 
         miniMap->setThumbnail(thumbnail);
@@ -2168,7 +2374,7 @@ private slots:
     {
         const QRectF page = pageItem->sceneBoundingRect();
 
-        if (pageItem->pixmap().isNull() || page.isEmpty()) {
+        if (pageItem->image().isNull() || page.isEmpty()) {
             miniMap->setViewport(QRectF());
             return;
         }
@@ -2202,7 +2408,7 @@ private slots:
     // Returns the link under a scene position, or null if there is none.
     const PageLink *linkAt(const QPointF &scenePos) const
     {
-        if (pageLinks.isEmpty() || pageItem->pixmap().isNull())
+        if (pageLinks.isEmpty() || pageItem->image().isNull())
             return nullptr;
 
         const QRectF page = pageItem->sceneBoundingRect();
@@ -2398,7 +2604,7 @@ private slots:
 
     void fitPage()
     {
-        if (pageCount <= 0 || pageItem->pixmap().isNull())
+        if (pageCount <= 0 || pageItem->image().isNull())
             return;
 
         canvas->fitInView(pageItem, Qt::KeepAspectRatio);
@@ -2408,7 +2614,7 @@ private slots:
 private:
     QGraphicsScene *scene = nullptr;
     PdfCanvas *canvas = nullptr;
-    QGraphicsPixmapItem *pageItem = nullptr;
+    PageImageItem *pageItem = nullptr;
 
     QStackedWidget *stack = nullptr;
     HomePage *homePage = nullptr;
@@ -2437,6 +2643,17 @@ private:
     int pageCount = 0;
     int currentPage = 0;
     quint64 requestId = 0;
+    // The page on screen, and the scale its render was asked for (0 while
+    // only a preview is shown). requestedScale is the latest request's scale.
+    int shownPage = -1;
+    double shownScale = 0.0;
+    double requestedScale = 0.0;
+    // The full-size bitmap of one page, kept for zooming back above fit.
+    QImage fullImage;
+    int fullPage = -1;
+    double fullImageScale = 0.0;
+    int fullPixelX = 0;
+    int fullPixelY = 0;
     quint64 lastOpenId = 0;
     quint64 openId = 0;
     QString pendingOpenPath;
