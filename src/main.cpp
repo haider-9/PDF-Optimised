@@ -17,6 +17,11 @@
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QSpinBox>
+#include <QComboBox>
+#include <QAbstractSpinBox>
+#include <QLineEdit>
+#include <QIcon>
+#include <QStringList>
 #include <QLabel>
 #include <QStatusBar>
 #include <QThread>
@@ -285,6 +290,8 @@ constexpr double kZoomHeadroom = 2.0;
 // A smaller bitmap is kept while it is at most this many times larger than
 // the zoom needs (zooming out), before a smaller one is rendered.
 constexpr double kMaxOversample = 3.0;
+// Zoom used when [ or ] steps to a pin, so the pin is easy to see.
+constexpr double kPinZoom = 2.0;
 // Number of parsed pages kept ready for fast re-rendering.
 constexpr int kDisplayListCacheSize = 16;
 
@@ -307,11 +314,16 @@ QColor defaultPenColor()
 // Qt needs this outside the anonymous namespace to pass PageLink in signals.
 Q_DECLARE_METATYPE(PageLink)
 
+// A numbered pin placed on a page. It belongs to one counter and takes that
+// counter's color. Its fraction is its position relative to the page, so it
+// can be found again at any zoom or page size.
 class CountMarkerItem : public QGraphicsItem
 {
 public:
-    CountMarkerItem(int number, bool preview = false)
-        : m_number(number), m_preview(preview)
+    CountMarkerItem(int number, int counter, const QColor &color,
+                    bool preview = false)
+        : m_number(number), m_counter(counter), m_color(color),
+          m_preview(preview)
     {
         setFlag(QGraphicsItem::ItemIgnoresTransformations);
         setAcceptedMouseButtons(Qt::NoButton);
@@ -319,7 +331,21 @@ public:
 
     QRectF boundingRect() const override
     {
-        return QRectF(-17, -40, 34, 42);
+        return QRectF(-22, -48, 44, 50);
+    }
+
+    int counter() const
+    {
+        return m_counter;
+    }
+
+    // A highlighted pin gets a ring, so the one being stepped to stands out.
+    void setHighlighted(bool on)
+    {
+        if (m_highlighted == on)
+            return;
+        m_highlighted = on;
+        update();
     }
 
     void setNumber(int number)
@@ -330,12 +356,34 @@ public:
         update();
     }
 
+    void setColor(const QColor &color)
+    {
+        m_color = color;
+        update();
+    }
+
+    QPointF fraction() const
+    {
+        return m_fraction;
+    }
+
+    void setFraction(const QPointF &fraction)
+    {
+        m_fraction = fraction;
+    }
+
     void paint(QPainter *painter, const QStyleOptionGraphicsItem *, QWidget *) override
     {
         painter->setRenderHint(QPainter::Antialiasing);
-        QColor fill("#bd5638");
+        QColor fill = m_color;
         if (m_preview)
             fill.setAlpha(165);
+
+        if (m_highlighted) {
+            painter->setPen(QPen(QColor("#ffd600"), 3));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawEllipse(QPointF(0, -26), 19, 19);
+        }
 
         QPainterPath pin;
         pin.moveTo(-7, -16);
@@ -360,6 +408,10 @@ public:
 
 private:
     int m_number = 1;
+    int m_counter = -1;
+    QColor m_color;
+    QPointF m_fraction;
+    bool m_highlighted = false;
     bool m_preview = false;
 };
 
@@ -941,7 +993,8 @@ public:
             ? QGraphicsView::NoDrag
             : QGraphicsView::ScrollHandDrag);
         if (enabled && !m_countPreview) {
-            m_countPreview = new CountMarkerItem(1, true);
+            m_countPreview = new CountMarkerItem(1, m_activeCounter,
+                                                 m_activeColor, true);
             m_countPreview->setZValue(30);
             scene()->addItem(m_countPreview);
         }
@@ -953,12 +1006,135 @@ public:
         emit countModeChanged(enabled);
     }
 
+    // Chooses the counter that new pins belong to. Id -1 means none.
+    void setActiveCounter(int id, const QColor &color)
+    {
+        m_activeCounter = id;
+        m_activeColor = color;
+
+        if (m_countPreview) {
+            m_countPreview->setColor(color);
+            m_countPreview->setNumber(countOn(m_currentPage, id) + 1);
+        }
+    }
+
+    int activeCounter() const
+    {
+        return m_activeCounter;
+    }
+
+    // Pins of every counter, on every page.
+    int pinCount() const
+    {
+        return m_markerOrder.size();
+    }
+
+    // Pins of one counter on one page.
+    int countOn(int page, int counter) const
+    {
+        int total = 0;
+        for (const CountMarkerItem *marker : m_countMarkers.value(page)) {
+            if (marker->counter() == counter)
+                ++total;
+        }
+        return total;
+    }
+
+    // Pins of one counter on every page.
+    int countTotal(int counter) const
+    {
+        int total = 0;
+        for (auto it = m_countMarkers.cbegin(); it != m_countMarkers.cend(); ++it) {
+            for (const CountMarkerItem *marker : it.value()) {
+                if (marker->counter() == counter)
+                    ++total;
+            }
+        }
+        return total;
+    }
+
+    // Pins of one counter on one page, in the order they were placed.
+    QList<CountMarkerItem *> markersOn(int page, int counter) const
+    {
+        QList<CountMarkerItem *> result;
+        for (CountMarkerItem *marker : m_countMarkers.value(page)) {
+            if (marker->counter() == counter)
+                result.append(marker);
+        }
+        return result;
+    }
+
+    // Pins of one counter in page order, with their page.
+    QList<QPair<int, CountMarkerItem *>> markersFor(int counter) const
+    {
+        QList<int> pages = m_countMarkers.keys();
+        std::sort(pages.begin(), pages.end());
+
+        QList<QPair<int, CountMarkerItem *>> result;
+        for (int page : pages) {
+            for (CountMarkerItem *marker : m_countMarkers.value(page)) {
+                if (marker->counter() == counter)
+                    result.append({page, marker});
+            }
+        }
+        return result;
+    }
+
+    // Removes every pin of a counter, for when the counter is deleted.
+    void removeCounterMarkers(int counter)
+    {
+        for (auto it = m_countMarkers.begin(); it != m_countMarkers.end(); ++it) {
+            QList<CountMarkerItem *> kept;
+            for (CountMarkerItem *marker : it.value()) {
+                if (marker->counter() == counter) {
+                    m_markerOrder.removeAll(marker);
+                    scene()->removeItem(marker);
+                    delete marker;
+                } else {
+                    kept.append(marker);
+                }
+            }
+            it.value() = kept;
+        }
+
+        renumberMarkers();
+        emit countChanged();
+    }
+
+    // Removes the most recently placed pin. Returns false if there is none.
+    bool undoLastMarker()
+    {
+        if (m_markerOrder.isEmpty())
+            return false;
+
+        CountMarkerItem *last = m_markerOrder.takeLast();
+        for (auto it = m_countMarkers.begin(); it != m_countMarkers.end(); ++it)
+            it.value().removeAll(last);
+
+        scene()->removeItem(last);
+        delete last;
+
+        renumberMarkers();
+        emit countChanged();
+        return true;
+    }
+
+    // Numbers each counter's pins 1, 2, 3... in order on every page.
+    void renumberMarkers()
+    {
+        for (auto it = m_countMarkers.begin(); it != m_countMarkers.end(); ++it) {
+            QHash<int, int> seen;
+            for (CountMarkerItem *marker : it.value())
+                marker->setNumber(++seen[marker->counter()]);
+        }
+    }
+
     void updateCountPreview(const QPointF &scenePos)
     {
         if (!m_countMode || !m_countPreview)
             return;
 
-        m_countPreview->setNumber(m_pageCounts.value(m_currentPage) + 1);
+        m_countPreview->setNumber(countOn(m_currentPage, m_activeCounter) + 1);
         m_countPreview->setPos(scenePos);
         m_countPreview->setVisible(scene()->sceneRect().contains(scenePos));
     }
@@ -972,10 +1148,10 @@ public:
             }
         }
         m_countMarkers.clear();
-        m_pageCounts.clear();
+        m_markerOrder.clear();
         if (m_countPreview)
             m_countPreview->setNumber(1);
-        emit countChanged(0);
+        emit countChanged();
     }
 
     void setCurrentPage(int page)
@@ -996,7 +1172,7 @@ public:
         if (m_countPreview)
             m_countPreview->setVisible(false);
 
-        emit countChanged(m_pageCounts.value(m_currentPage));
+        emit countChanged();
     }
 
     // Removes the most recently drawn stroke. Returns false if none.
@@ -1110,7 +1286,7 @@ signals:
     void zoomChanged(double zoom);
     void pencilModeChanged(bool enabled);
     void countModeChanged(bool enabled);
-    void countChanged(int total);
+    void countChanged();
     void viewportResized();
     void linkClicked(const QPointF &scenePos);
     void hovered(const QPointF &scenePos);
@@ -1254,15 +1430,24 @@ protected:
             if (moved.manhattanLength() < 4) {
                 const QPointF scenePos = mapToScene(event->position().toPoint());
                 if (m_countMode) {
-                    if (scene()->sceneRect().contains(scenePos)) {
-                        const int number = m_pageCounts.value(m_currentPage) + 1;
-                        m_pageCounts.insert(m_currentPage, number);
-                        auto *marker = new CountMarkerItem(number);
+                    const QRectF page = scene()->sceneRect();
+                    if (m_activeCounter >= 0 && page.contains(scenePos)) {
+                        const QPointF fraction(
+                            (scenePos.x() - page.left()) / page.width(),
+                            (scenePos.y() - page.top()) / page.height()
+                        );
+
+                        const int number =
+                            countOn(m_currentPage, m_activeCounter) + 1;
+                        auto *marker = new CountMarkerItem(
+                            number, m_activeCounter, m_activeColor);
                         marker->setPos(scenePos);
+                        marker->setFraction(fraction);
                         marker->setZValue(20);
                         scene()->addItem(marker);
                         m_countMarkers[m_currentPage].append(marker);
-                        emit countChanged(number);
+                        m_markerOrder.append(marker);
+                        emit countChanged();
                         updateCountPreview(scenePos);
                     }
                     event->accept();
@@ -1303,7 +1488,10 @@ private:
     bool m_linkCursor = false;
 
     int m_currentPage = 0;
-    QHash<int, int> m_pageCounts;
+    int m_activeCounter = -1;
+    QColor m_activeColor;
+    // Every pin in the order it was placed, for undo.
+    QList<CountMarkerItem *> m_markerOrder;
     QPoint lastMousePosition;
 
     QPainterPath m_currentPath;
@@ -1637,6 +1825,13 @@ private:
 };
 
 
+// A named counter. Its pins take its color, and it is chosen in the toolbar.
+struct CounterDef {
+    int id = -1;
+    QString name;
+    QColor color;
+};
+
 // Shows one rendered page. It draws the page's QImage directly, so the
 // pixels are kept once instead of being copied into a QPixmap.
 class PageImageItem : public QGraphicsItem
@@ -1764,10 +1959,37 @@ public:
         );
         countAction->setCheckable(true);
         countAction->setEnabled(false);
-        countAction->setToolTip("Place numbered ticks on the PDF (C)");
+        countAction->setToolTip("Place numbered pins on the PDF (C)");
 
         connect(countAction, &QAction::triggered,
-            canvas, &PdfCanvas::setCountMode);
+            this, &MainWindow::toggleCountMode);
+
+        counterCombo = new QComboBox(toolbar);
+        counterCombo->setToolTip("Counter that new pins belong to (1-9)");
+        counterCombo->setEnabled(false);
+        toolbar->addWidget(counterCombo);
+
+        addCounterAction = toolbar->addAction(
+            themeIcon("list-add",
+                      appStyle->standardIcon(QStyle::SP_FileDialogNewFolder)),
+            "New Counter"
+        );
+        addCounterAction->setToolTip("Add a counter");
+        connect(addCounterAction, &QAction::triggered,
+                this, [this] { addCounter(); });
+
+        removeCounterAction = toolbar->addAction(
+            themeIcon("list-remove",
+                      appStyle->standardIcon(QStyle::SP_TrashIcon)),
+            "Remove Counter"
+        );
+        removeCounterAction->setEnabled(false);
+        removeCounterAction->setToolTip("Remove the active counter and its pins");
+        connect(removeCounterAction, &QAction::triggered,
+                this, &MainWindow::removeActiveCounter);
+
+        connect(counterCombo, &QComboBox::activated,
+                this, &MainWindow::selectCounterAt);
 
         clearMarkersAction = toolbar->addAction(
             themeIcon("edit-clear",
@@ -1775,14 +1997,25 @@ public:
             "Clear Markers"
         );
         clearMarkersAction->setEnabled(false);
-        clearMarkersAction->setToolTip("Remove all placed markers");
-        connect(clearMarkersAction, &QAction::triggered,
-                canvas, &PdfCanvas::clearCountMarkers);
+        clearMarkersAction->setToolTip("Remove all placed pins");
+        connect(clearMarkersAction, &QAction::triggered, this, [this] {
+            const int pins = canvas->pinCount();
+            if (pins > 0) {
+                const auto answer = QMessageBox::question(
+                    this,
+                    "Clear pins",
+                    QString("Remove all %1 pins on every counter?").arg(pins)
+                );
+                if (answer != QMessageBox::Yes)
+                    return;
+            }
+
+            canvas->clearCountMarkers();
+            navMarker = nullptr;
+        });
 
         connect(canvas, &PdfCanvas::countChanged,
-            this, [this](int total) {
-            countTotalLabel->setText(QString("Page ticks: %1").arg(total));
-        });
+            this, [this] { refreshCountLabel(); });
 
         pageNumber = new QSpinBox(this);
         pageNumber->setMinimum(1);
@@ -1796,7 +2029,7 @@ public:
                          QSizePolicy::Preferred);
         toolbar->addWidget(toolbarSpacer);
 
-        countTotalLabel = new QLabel("Page ticks: 0", toolbar);
+        countTotalLabel = new QLabel("No counter", toolbar);
         countTotalLabel->setObjectName("countTotal");
         toolbar->addWidget(countTotalLabel);
 
@@ -1998,8 +2231,20 @@ public:
 
         addShortcut(Qt::Key_C, [this] {
             if (countAction->isEnabled())
-                canvas->setCountMode(!canvas->countMode());
+                toggleCountMode(!canvas->countMode());
         });
+
+        // 1-9 choose a counter while pins are being placed. They are ignored
+        // while a number box or text field has focus, so typing still works.
+        for (int i = 0; i < 9; ++i) {
+            addShortcut(static_cast<Qt::Key>(Qt::Key_1 + i), [this, i] {
+                if (canvas->countMode() && !textInputHasFocus())
+                    selectCounterAt(i);
+            });
+        }
+
+        addShortcut(Qt::Key_BracketRight, [this] { stepCounter(1); });
+        addShortcut(Qt::Key_BracketLeft, [this] { stepCounter(-1); });
 
         auto *undo = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Z), this);
         undo->setContext(Qt::ApplicationShortcut);
@@ -2096,6 +2341,7 @@ private slots:
         canvas->setCountMode(false);
         canvas->setPencilMode(false);
         canvas->clearCountMarkers();
+        navMarker = nullptr;
         canvas->clearAnnotations();
         hasPendingPan = false;
         linkPage = -1;
@@ -2338,7 +2584,13 @@ private slots:
         // Same for a link that jumps to a point on its target page.
         if (hasPendingPan && !fitOnNextRender) {
             hasPendingPan = false;
-            panToNormalized(pendingPanCenter);
+
+            if (pendingPinFocus) {
+                pendingPinFocus = false;
+                focusPin(pendingPanCenter);
+            } else {
+                panToNormalized(pendingPanCenter);
+            }
         }
 
         // The thumbnail only depends on the page, not the zoom level.
@@ -2513,6 +2765,210 @@ private slots:
         }
     }
 
+    // Turns pin placement on or off. The first counter is made on demand.
+    void toggleCountMode(bool on)
+    {
+        if (on && counters.isEmpty())
+            addCounter();
+
+        canvas->setCountMode(on);
+    }
+
+    static QColor counterColor(int index)
+    {
+        static const QStringList palette = {
+            "#bd5638", "#2e7d32", "#1565c0", "#6a1b9a", "#ad8b00", "#00838f"
+        };
+        return QColor(palette.at(index % palette.size()));
+    }
+
+    const CounterDef *findCounter(int id) const
+    {
+        for (const CounterDef &counter : counters) {
+            if (counter.id == id)
+                return &counter;
+        }
+        return nullptr;
+    }
+
+    void addCounter()
+    {
+        CounterDef counter;
+        counter.id = nextCounterId++;
+        counter.name = QString("Counter %1").arg(counter.id);
+        counter.color = counterColor(counters.size());
+        counters.append(counter);
+
+        selectCounter(counter.id);
+        statusBar()->showMessage(QString("Added %1.").arg(counter.name));
+    }
+
+    void selectCounter(int id)
+    {
+        const CounterDef *counter = findCounter(id);
+        activeCounterId = counter ? id : -1;
+        navMarker = nullptr;
+
+        canvas->setActiveCounter(activeCounterId,
+                                 counter ? counter->color : QColor());
+        rebuildCounterCombo();
+        refreshCountLabel();
+    }
+
+    // Chooses a counter by its position in the list (0 is the first).
+    void selectCounterAt(int position)
+    {
+        if (position >= 0 && position < counters.size())
+            selectCounter(counters.at(position).id);
+    }
+
+    void removeActiveCounter()
+    {
+        const CounterDef *active = findCounter(activeCounterId);
+        if (!active)
+            return;
+
+        const int id = active->id;
+        const QString name = active->name;
+        const int pins = canvas->countTotal(id);
+
+        if (pins > 0) {
+            const auto answer = QMessageBox::question(
+                this,
+                "Remove counter",
+                QString("Remove %1 and its %2 pins?").arg(name).arg(pins)
+            );
+            if (answer != QMessageBox::Yes)
+                return;
+        }
+
+        canvas->removeCounterMarkers(id);
+
+        for (int i = 0; i < counters.size(); ++i) {
+            if (counters.at(i).id == id) {
+                counters.removeAt(i);
+                break;
+            }
+        }
+
+        selectCounter(counters.isEmpty() ? -1 : counters.first().id);
+        statusBar()->showMessage(QString("Removed %1.").arg(name));
+    }
+
+    // Fills the dropdown with the counters, each with its color.
+    void rebuildCounterCombo()
+    {
+        counterCombo->blockSignals(true);
+        counterCombo->clear();
+
+        int index = -1;
+        for (int i = 0; i < counters.size(); ++i) {
+            QPixmap swatch(12, 12);
+            swatch.fill(counters.at(i).color);
+            counterCombo->addItem(QIcon(swatch), counters.at(i).name);
+
+            if (counters.at(i).id == activeCounterId)
+                index = i;
+        }
+
+        counterCombo->setCurrentIndex(index);
+        counterCombo->setEnabled(!counters.isEmpty());
+        removeCounterAction->setEnabled(!counters.isEmpty());
+        counterCombo->blockSignals(false);
+    }
+
+    // Shows the active counter's pins on this page and in the whole document.
+    void refreshCountLabel()
+    {
+        const CounterDef *active = findCounter(activeCounterId);
+        if (!active) {
+            countTotalLabel->setText("No counter");
+            return;
+        }
+
+        countTotalLabel->setText(
+            QString("%1: this page %2, all pages %3")
+                .arg(active->name)
+                .arg(canvas->countOn(currentPage, active->id))
+                .arg(canvas->countTotal(active->id))
+        );
+    }
+
+    // Moves to the next (direction > 0) or previous pin of the active
+    // counter on the current page, wrapping at the ends.
+    void stepCounter(int direction)
+    {
+        const QList<CountMarkerItem *> marks =
+            canvas->markersOn(currentPage, activeCounterId);
+        if (marks.isEmpty()) {
+            statusBar()->showMessage("No pins for this counter on this page.");
+            return;
+        }
+
+        int index = -1;
+        for (int i = 0; i < marks.size(); ++i) {
+            if (marks.at(i) == navMarker) {
+                index = i;
+                break;
+            }
+        }
+
+        // Only a pin found on this page is safe to touch: an undone pin may
+        // have been freed already, and there may be none yet.
+        if (index >= 0)
+            navMarker->setHighlighted(false);
+
+        // Starting from no pin: next is the first, previous is the last.
+        if (index < 0)
+            index = direction > 0 ? -1 : marks.size();
+
+        index = (index + direction + marks.size()) % marks.size();
+
+        CountMarkerItem *marker = marks.at(index);
+        navMarker = marker;
+        marker->setHighlighted(true);
+
+        focusPin(marker->fraction());
+        statusBar()->showMessage(
+            QString("Pin %1 of %2 on this page")
+                .arg(index + 1).arg(marks.size())
+        );
+    }
+
+    // Shows a pin: zooms in on it and centers the view, changing page if
+    // needed.
+    void jumpToPin(int page, const QPointF &fraction)
+    {
+        if (page == currentPage) {
+            focusPin(fraction);
+            return;
+        }
+
+        pendingPanCenter = fraction;
+        hasPendingPan = true;
+        pendingPinFocus = true;
+        pageNumber->setValue(page + 1);
+    }
+
+    // Zooms to at least kPinZoom, then centers on a point of the page.
+    void focusPin(const QPointF &fraction)
+    {
+        const double zoom = canvas->zoomLevel();
+        if (zoom < kPinZoom) {
+            canvas->scale(kPinZoom / zoom, kPinZoom / zoom);
+            canvas->zoomChanged(canvas->zoomLevel());
+        }
+
+        panToNormalized(fraction);
+    }
+
+    bool textInputHasFocus() const
+    {
+        const QWidget *focus = QApplication::focusWidget();
+        return qobject_cast<const QAbstractSpinBox *>(focus)
+            || qobject_cast<const QLineEdit *>(focus);
+    }
+
     void redoStroke()
     {
         if (canvas->redoLastStroke())
@@ -2523,6 +2979,16 @@ private slots:
 
     void undoStroke()
     {
+        // While placing pins, undo removes the last pin. Otherwise it undoes
+        // the last pencil line.
+        if (canvas->countMode()) {
+            if (canvas->undoLastMarker())
+                statusBar()->showMessage("Removed the last pin.");
+            else
+                statusBar()->showMessage("Nothing to undo.");
+            return;
+        }
+
         if (canvas->undoLastStroke())
             statusBar()->showMessage("Removed the last line.");
         else
@@ -2625,6 +3091,8 @@ private:
     quint64 linkRequestId = 0;
     QPointF pendingPanCenter;
     bool hasPendingPan = false;
+    // The pending pan is a pin being stepped to, so zoom in on it too.
+    bool pendingPinFocus = false;
     QPointF lastHoverPos;
 
     MiniMap *miniMap = nullptr;
@@ -2635,6 +3103,15 @@ private:
     QAction *pencilAction = nullptr;
     QAction *countAction = nullptr;
     QAction *clearMarkersAction = nullptr;
+    QComboBox *counterCombo = nullptr;
+    QAction *addCounterAction = nullptr;
+    QAction *removeCounterAction = nullptr;
+
+    QList<CounterDef> counters;
+    int nextCounterId = 1;
+    int activeCounterId = -1;
+    // The pin the last [ or ] step went to, so the next step continues on.
+    CountMarkerItem *navMarker = nullptr;
 
     QThread renderThread;
     PdfWorker *worker = nullptr;
