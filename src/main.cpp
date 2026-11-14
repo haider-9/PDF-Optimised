@@ -46,6 +46,7 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QSettings>
+#include <QInputDialog>
 #include <QFont>
 #include <QFrame>
 #include <QPen>
@@ -1978,6 +1979,16 @@ public:
         connect(addCounterAction, &QAction::triggered,
                 this, [this] { addCounter(); });
 
+        renameCounterAction = toolbar->addAction(
+            themeIcon("document-edit",
+                      appStyle->standardIcon(QStyle::SP_FileDialogDetailedView)),
+            "Rename Counter"
+        );
+        renameCounterAction->setEnabled(false);
+        renameCounterAction->setToolTip("Rename the active counter");
+        connect(renameCounterAction, &QAction::triggered,
+                this, &MainWindow::renameActiveCounter);
+
         removeCounterAction = toolbar->addAction(
             themeIcon("list-remove",
                       appStyle->standardIcon(QStyle::SP_TrashIcon)),
@@ -2261,6 +2272,7 @@ public:
 
         renderThread.start();
 
+        loadCounters();
     }
 
     ~MainWindow() override
@@ -2765,6 +2777,78 @@ private slots:
         }
     }
 
+    // Asks for a new name for the active counter. Pins keep their color.
+    void renameActiveCounter()
+    {
+        const CounterDef *active = findCounter(activeCounterId);
+        if (!active)
+            return;
+
+        const int id = active->id;
+        bool ok = false;
+        const QString name = QInputDialog::getText(
+            this,
+            "Rename counter",
+            "Name:",
+            QLineEdit::Normal,
+            active->name,
+            &ok
+        ).trimmed();
+
+        if (!ok || name.isEmpty())
+            return;
+
+        for (CounterDef &counter : counters) {
+            if (counter.id == id)
+                counter.name = name;
+        }
+
+        rebuildCounterCombo();
+        refreshCountLabel();
+        saveCounters();
+        statusBar()->showMessage(QString("Renamed the counter to %1.").arg(name));
+    }
+
+    // Counters (name and color) are kept between runs. Their pins belong to
+    // the document, so they are not kept.
+    void saveCounters()
+    {
+        QSettings settings;
+        settings.beginWriteArray("counters", counters.size());
+        for (int i = 0; i < counters.size(); ++i) {
+            settings.setArrayIndex(i);
+            settings.setValue("name", counters.at(i).name);
+            settings.setValue("color", counters.at(i).color.name());
+        }
+        settings.endArray();
+    }
+
+    void loadCounters()
+    {
+        QSettings settings;
+        const int count = settings.beginReadArray("counters");
+        for (int i = 0; i < count; ++i) {
+            settings.setArrayIndex(i);
+
+            CounterDef counter;
+            counter.id = nextCounterId++;
+            counter.name = settings.value("name").toString();
+            if (counter.name.isEmpty())
+                counter.name = QString("Counter %1").arg(counter.id);
+            counter.color = QColor(settings.value("color").toString());
+            if (!counter.color.isValid())
+                counter.color = counterColor(i);
+
+            counters.append(counter);
+        }
+        settings.endArray();
+
+        if (!counters.isEmpty())
+            selectCounter(counters.first().id);
+        else
+            rebuildCounterCombo();
+    }
+
     // Turns pin placement on or off. The first counter is made on demand.
     void toggleCountMode(bool on)
     {
@@ -2800,6 +2884,7 @@ private slots:
         counters.append(counter);
 
         selectCounter(counter.id);
+        saveCounters();
         statusBar()->showMessage(QString("Added %1.").arg(counter.name));
     }
 
@@ -2852,6 +2937,7 @@ private slots:
         }
 
         selectCounter(counters.isEmpty() ? -1 : counters.first().id);
+        saveCounters();
         statusBar()->showMessage(QString("Removed %1.").arg(name));
     }
 
@@ -2874,6 +2960,7 @@ private slots:
         counterCombo->setCurrentIndex(index);
         counterCombo->setEnabled(!counters.isEmpty());
         removeCounterAction->setEnabled(!counters.isEmpty());
+        renameCounterAction->setEnabled(!counters.isEmpty());
         counterCombo->blockSignals(false);
     }
 
@@ -3106,6 +3193,7 @@ private:
     QComboBox *counterCombo = nullptr;
     QAction *addCounterAction = nullptr;
     QAction *removeCounterAction = nullptr;
+    QAction *renameCounterAction = nullptr;
 
     QList<CounterDef> counters;
     int nextCounterId = 1;
