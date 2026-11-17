@@ -917,6 +917,16 @@ private:
 };
 
 
+// One pin placement or deletion, so Ctrl+Z can take it back.
+struct PinAction {
+    bool placed = false;      // true: a pin was placed; false: one was deleted
+    CountMarkerItem *marker = nullptr;
+    int page = 0;
+    int counter = -1;
+    QPointF fraction;
+    QColor color;
+};
+
 class PdfCanvas : public QGraphicsView
 {
     Q_OBJECT
@@ -1105,6 +1115,11 @@ public:
     // Removes every pin of a counter, for when the counter is deleted.
     void removeCounterMarkers(int counter)
     {
+        m_pinHistory.erase(std::remove_if(m_pinHistory.begin(), m_pinHistory.end(),
+            [counter](const PinAction &action) {
+                return action.counter == counter;
+            }), m_pinHistory.end());
+
         for (auto it = m_countMarkers.begin(); it != m_countMarkers.end(); ++it) {
             QList<CountMarkerItem *> kept;
             for (CountMarkerItem *marker : it.value()) {
@@ -1123,13 +1138,42 @@ public:
         emit countChanged();
     }
 
-    // Removes the most recently placed pin. Returns false if there is none.
-    bool undoLastMarker()
+    // Takes back the last pin placement or deletion. Returns false if none.
+    bool undoPinAction()
     {
-        if (m_markerOrder.isEmpty())
+        while (!m_pinHistory.isEmpty()) {
+            const PinAction action = m_pinHistory.takeLast();
+            if (action.placed) {
+                if (!hasMarker(action.marker))
+                    continue;
+                eraseMarker(action.marker);
+                return true;
+            }
+
+            if (restorePin(action))
+                return true;
+        }
+        return false;
+    }
+
+    bool restorePin(const PinAction &action)
+    {
+        const QRectF rect = m_pageRects.value(action.page);
+        if (rect.isEmpty())
             return false;
 
-        removeMarker(m_markerOrder.last());
+        auto *marker = new CountMarkerItem(1, action.counter, action.color);
+        marker->setPos(rect.left() + action.fraction.x() * rect.width(),
+                       rect.top() + action.fraction.y() * rect.height());
+        marker->setFraction(action.fraction);
+        marker->setZValue(20);
+        marker->setVisible(action.page == m_currentPage);
+        scene()->addItem(marker);
+        m_countMarkers[action.page].append(marker);
+        m_markerOrder.append(marker);
+
+        renumberMarkers();
+        emit countChanged();
         return true;
     }
 
@@ -1138,11 +1182,28 @@ public:
         return m_markerOrder.contains(marker);
     }
 
+    // Deletes a pin the user removed, so the deletion can be undone.
     void removeMarker(CountMarkerItem *marker)
+    {
+        for (auto it = m_countMarkers.cbegin(); it != m_countMarkers.cend(); ++it) {
+            if (it.value().contains(marker)) {
+                m_pinHistory.append(PinAction{false, nullptr, it.key(),
+                    marker->counter(), marker->fraction(), marker->color()});
+                break;
+            }
+        }
+        eraseMarker(marker);
+    }
+
+    void eraseMarker(CountMarkerItem *marker)
     {
         m_markerOrder.removeAll(marker);
         for (auto it = m_countMarkers.begin(); it != m_countMarkers.end(); ++it)
             it.value().removeAll(marker);
+        m_pinHistory.erase(std::remove_if(m_pinHistory.begin(), m_pinHistory.end(),
+            [marker](const PinAction &action) {
+                return action.placed && action.marker == marker;
+            }), m_pinHistory.end());
 
         scene()->removeItem(marker);
         delete marker;
@@ -1192,6 +1253,7 @@ public:
         }
         m_countMarkers.clear();
         m_markerOrder.clear();
+        m_pinHistory.clear();
         if (m_countPreview)
             m_countPreview->setNumber(1);
         emit countChanged();
@@ -1644,6 +1706,9 @@ protected:
                         scene()->addItem(marker);
                         m_countMarkers[m_currentPage].append(marker);
                         m_markerOrder.append(marker);
+                        m_pinHistory.append(PinAction{true, marker,
+                            m_currentPage, m_activeCounter, fraction,
+                            m_activeColor});
                         emit countChanged();
                         updateCountPreview(scenePos);
                     }
@@ -1689,6 +1754,7 @@ private:
     QColor m_activeColor;
     // Every pin in the order it was placed, for undo.
     QList<CountMarkerItem *> m_markerOrder;
+    QList<PinAction> m_pinHistory;
     QPoint lastMousePosition;
 
     QPainterPath m_currentPath;
@@ -3631,8 +3697,8 @@ private slots:
         // While placing pins, undo removes the last pin. Otherwise it undoes
         // the last pencil line.
         if (canvas->countMode()) {
-            if (canvas->undoLastMarker())
-                statusBar()->showMessage("Removed the last pin.");
+            if (canvas->undoPinAction())
+                statusBar()->showMessage("Undid the last pin change.");
             else
                 statusBar()->showMessage("Nothing to undo.");
             return;
