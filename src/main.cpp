@@ -917,6 +917,29 @@ private:
 };
 
 
+// A light icon with a dark edge, so the cursor shows on pages and on the
+// dark background alike.
+QCursor outlinedCursor(const QIcon &icon, const QPoint &hotspot)
+{
+    constexpr int margin = 2;
+    QPixmap pixmap(24 + 2 * margin, 24 + 2 * margin);
+    pixmap.fill(Qt::transparent);
+
+    const QPixmap edge = tintedIcon(icon, QColor(20, 20, 20)).pixmap(24, 24);
+    const QPixmap glyph =
+        tintedIcon(icon, QColor(245, 245, 245)).pixmap(24, 24);
+
+    QPainter painter(&pixmap);
+    for (int dx = -1; dx <= 1; ++dx) {
+        for (int dy = -1; dy <= 1; ++dy)
+            painter.drawPixmap(margin + dx, margin + dy, edge);
+    }
+    painter.drawPixmap(margin, margin, glyph);
+    painter.end();
+
+    return QCursor(pixmap, hotspot.x() + margin, hotspot.y() + margin);
+}
+
 // One pin placement or deletion, so Ctrl+Z can take it back.
 struct PinAction {
     bool placed = false;      // true: a pin was placed; false: one was deleted
@@ -1261,6 +1284,7 @@ public:
 
     void setCurrentPage(int page)
     {
+        highlightStroke(nullptr);
         m_currentPage = page;
         for (auto it = m_annotations.begin();
              it != m_annotations.end(); ++it) {
@@ -1501,6 +1525,68 @@ public:
         emit annotationsLoaded();
     }
 
+    void setPenColor(const QColor &color)
+    {
+        m_penColor = color;
+    }
+
+    // Pencil thickness in screen pixels, so it looks the same at any zoom.
+    void setPenWidth(double pixels)
+    {
+        m_penWidth = pixels;
+    }
+
+    void setEraserMode(bool enabled)
+    {
+        m_eraserMode = enabled;
+        m_erasing = false;
+        updateInteractionCursor();
+    }
+
+    // The pencil line under a view position on the current page, if any.
+    QGraphicsPathItem *strokeAt(const QPoint &viewPos) const
+    {
+        const QRect area(viewPos - QPoint(5, 5), QSize(11, 11));
+        for (QGraphicsItem *item : items(area)) {
+            auto *stroke = dynamic_cast<QGraphicsPathItem *>(item);
+            if (stroke && m_annotations.value(m_currentPage).contains(stroke))
+                return stroke;
+        }
+        return nullptr;
+    }
+
+    void eraseStrokeAt(const QPoint &viewPos)
+    {
+        if (QGraphicsPathItem *stroke = strokeAt(viewPos))
+            deleteStroke(stroke);
+    }
+
+    bool deleteSelectedStroke()
+    {
+        if (!m_highlighted)
+            return false;
+
+        deleteStroke(m_highlighted);
+        return true;
+    }
+
+    void deleteStroke(QGraphicsPathItem *stroke)
+    {
+        m_strokeOrder.erase(std::remove_if(m_strokeOrder.begin(), m_strokeOrder.end(),
+            [stroke](const QPair<int, QGraphicsPathItem *> &entry) {
+                return entry.second == stroke;
+            }), m_strokeOrder.end());
+        for (auto it = m_annotations.begin(); it != m_annotations.end(); ++it)
+            it.value().removeAll(stroke);
+
+        if (m_highlighted == stroke)
+            m_highlighted = nullptr;
+
+        scene()->removeItem(stroke);
+        delete stroke;
+        emit strokesChanged();
+    }
+
     void clearAnnotations()
     {
         for (auto it = m_annotations.begin();
@@ -1566,6 +1652,15 @@ protected:
     void mousePressEvent(QMouseEvent *event) override
     {
         if (m_pencilMode && event->button() == Qt::LeftButton) {
+            if (m_eraserMode) {
+                m_erasing = true;
+                eraseStrokeAt(event->position().toPoint());
+                event->accept();
+                return;
+            }
+
+            m_clickStart = event->position().toPoint();
+            m_clickPending = true;
             m_drawing = true;
             discardRedo();
 
@@ -1575,7 +1670,7 @@ protected:
 
             QPen pen(
                 m_penColor,
-                2.0 / qMax(zoomLevel(), 0.05),
+                m_penWidth / qMax(zoomLevel(), 0.05),
                 Qt::SolidLine,
                 Qt::RoundCap,
                 Qt::RoundJoin
@@ -1621,6 +1716,12 @@ protected:
 
     void mouseMoveEvent(QMouseEvent *event) override
     {
+        if (m_erasing) {
+            eraseStrokeAt(event->position().toPoint());
+            event->accept();
+            return;
+        }
+
         if (m_drawing && m_currentPathItem) {
             m_currentPath.lineTo(
                 mapToScene(event->position().toPoint())
@@ -1656,12 +1757,20 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent *event) override
     {
+        if (event->button() == Qt::LeftButton && m_erasing) {
+            m_erasing = false;
+            event->accept();
+            return;
+        }
+
         if (event->button() == Qt::LeftButton && m_drawing) {
             m_drawing = false;
-            if (isLongEnough(m_currentPathItem))
+            if (isLongEnough(m_currentPathItem)) {
                 emit strokesChanged();
-            else
+            } else {
                 discardLastStroke();
+                highlightStroke(strokeAt(m_clickStart));
+            }
             m_currentPathItem = nullptr;
             event->accept();
             return;
@@ -1731,8 +1840,18 @@ private:
             viewport()->setCursor(Qt::BlankCursor);
         else if (middlePanning)
             viewport()->setCursor(Qt::ClosedHandCursor);
-        else if (m_pencilMode)
-            viewport()->setCursor(Qt::CrossCursor);
+        else if (m_pencilMode) {
+            // The pencil's tip is its bottom-left corner; the eraser's
+            // hotspot is its center.
+            static const QCursor pencilCursor = outlinedCursor(
+                themeIcon("draw-freehand", themeIcon("document-edit")),
+                QPoint(3, 21));
+            static const QCursor eraserCursor = outlinedCursor(
+                themeIcon("draw-eraser", QApplication::style()->standardIcon(
+                    QStyle::SP_TrashIcon)),
+                QPoint(12, 12));
+            viewport()->setCursor(m_eraserMode ? eraserCursor : pencilCursor);
+        }
         else if (m_linkCursor)
             viewport()->setCursor(Qt::PointingHandCursor);
         else if (dragMode() == QGraphicsView::ScrollHandDrag)
@@ -1772,6 +1891,9 @@ private:
     QList<QPair<int, QGraphicsPathItem *>> m_redoStack;
 
     QColor m_penColor = defaultPenColor();
+    double m_penWidth = 2.0;
+    bool m_eraserMode = false;
+    bool m_erasing = false;
     QGraphicsPathItem *m_highlighted = nullptr;
 };
 
@@ -2216,6 +2338,43 @@ public:
 
         pencilAction->setCheckable(true);
 
+        auto *penColorCombo = new QComboBox(toolbar);
+        penColorCombo->setToolTip("Pencil color");
+        const QStringList penColors = {
+            "#ff6b35", "#e53935", "#1e88e5", "#43a047",
+            "#fdd835", "#8e24aa", "#000000", "#ffffff"
+        };
+        for (const QString &hex : penColors) {
+            QPixmap swatch(12, 12);
+            swatch.fill(QColor(hex));
+            penColorCombo->addItem(QIcon(swatch), QString());
+        }
+        connect(penColorCombo, &QComboBox::activated, this,
+                [this, penColors](int index) {
+            canvas->setPenColor(QColor(penColors.at(index)));
+        });
+        toolbar->addWidget(penColorCombo);
+
+        auto *penWidthCombo = new QComboBox(toolbar);
+        penWidthCombo->setToolTip("Pencil thickness");
+        penWidthCombo->addItems({"Fine", "Medium", "Thick"});
+        connect(penWidthCombo, &QComboBox::activated, this, [this](int index) {
+            static const double widths[] = {2.0, 4.0, 7.0};
+            canvas->setPenWidth(widths[index]);
+        });
+        toolbar->addWidget(penWidthCombo);
+
+        QAction *eraserAction = toolbar->addAction(
+            themeIcon("draw-eraser",
+                      appStyle->standardIcon(QStyle::SP_TrashIcon)),
+            "Eraser"
+        );
+        eraserAction->setCheckable(true);
+        eraserAction->setToolTip(
+            "Eraser: click or drag over pencil lines to delete them");
+        connect(eraserAction, &QAction::toggled, this,
+                [this](bool on) { canvas->setEraserMode(on); });
+
         countAction = toolbar->addAction(
             themeIcon("mark-location",
                   appStyle->standardIcon(QStyle::SP_DialogApplyButton)),
@@ -2419,8 +2578,10 @@ public:
                  QKeySequence(Qt::Key_Backspace)}) {
             auto *deleteShortcut = new QShortcut(sequence, canvas);
             deleteShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-            connect(deleteShortcut, &QShortcut::activated,
-                    this, &MainWindow::deleteSelectedPin);
+            connect(deleteShortcut, &QShortcut::activated, this, [this] {
+                if (!canvas->deleteSelectedStroke())
+                    deleteSelectedPin();
+            });
         }
 
         pageNumber = new QSpinBox(this);
