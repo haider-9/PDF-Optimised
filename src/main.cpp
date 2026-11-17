@@ -342,6 +342,11 @@ public:
         return m_counter;
     }
 
+    int number() const
+    {
+        return m_number;
+    }
+
     // A highlighted pin gets a ring, so the one being stepped to stands out.
     void setHighlighted(bool on)
     {
@@ -2078,22 +2083,79 @@ public:
         countLayout->addWidget(countTotalLabel);
         countLayout->addWidget(counterCombo);
 
-        auto *pinRow = new QHBoxLayout();
-        auto *previousPinButton = new QPushButton("Previous pin", countPanel);
-        auto *nextPinButton = new QPushButton("Next pin", countPanel);
-        pinRow->addWidget(previousPinButton);
-        pinRow->addWidget(nextPinButton);
-        countLayout->addLayout(pinRow);
+        auto *scopeRow = new QHBoxLayout();
+        scopeRow->setSpacing(4);
+        auto *allPagesButton = new QToolButton(countPanel);
+        allPagesButton->setText("All pages");
+        allPagesButton->setCheckable(true);
+        allPagesButton->setChecked(true);
+        auto *thisPageButton = new QToolButton(countPanel);
+        thisPageButton->setText("This page");
+        thisPageButton->setCheckable(true);
+        for (QToolButton *button : {allPagesButton, thisPageButton}) {
+            button->setAutoExclusive(true);
+            button->setToolButtonStyle(Qt::ToolButtonTextOnly);
+            button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            scopeRow->addWidget(button, 1);
+        }
+        countLayout->addLayout(scopeRow);
 
-        auto *deletePinButton = new QPushButton("Delete selected pin", countPanel);
-        countLayout->addWidget(deletePinButton);
+        connect(allPagesButton, &QToolButton::toggled, this, [this](bool on) {
+            if (on) {
+                navPageOnly = false;
+                refreshMarkerList();
+            }
+        });
+        connect(thisPageButton, &QToolButton::toggled, this, [this](bool on) {
+            if (on) {
+                navPageOnly = true;
+                refreshMarkerList();
+            }
+        });
 
-        connect(previousPinButton, &QPushButton::clicked,
+        auto *navRow = new QHBoxLayout();
+        navRow->setSpacing(4);
+        auto *previousPinButton = new QToolButton(countPanel);
+        previousPinButton->setIcon(themeIcon("go-previous",
+                      style()->standardIcon(QStyle::SP_ArrowBack)));
+        previousPinButton->setText("  [");
+        previousPinButton->setToolTip("Previous pin ([)");
+        auto *nextPinButton = new QToolButton(countPanel);
+        nextPinButton->setIcon(themeIcon("go-next",
+                      style()->standardIcon(QStyle::SP_ArrowForward)));
+        nextPinButton->setText("  ]");
+        nextPinButton->setToolTip("Next pin (])");
+        auto *deletePinButton = new QToolButton(countPanel);
+        deletePinButton->setIcon(themeIcon("edit-delete",
+                      style()->standardIcon(QStyle::SP_TrashIcon)));
+        deletePinButton->setText("  Delete");
+        deletePinButton->setToolTip("Delete the selected pin");
+        for (QToolButton *button : {previousPinButton, nextPinButton,
+                                    deletePinButton}) {
+            button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+            button->setIconSize(QSize(16, 16));
+            button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            navRow->addWidget(button, 1);
+        }
+        countLayout->addLayout(navRow);
+
+        connect(previousPinButton, &QToolButton::clicked,
                 this, [this] { stepCounter(-1); });
-        connect(nextPinButton, &QPushButton::clicked,
+        connect(nextPinButton, &QToolButton::clicked,
                 this, [this] { stepCounter(1); });
-        connect(deletePinButton, &QPushButton::clicked,
+        connect(deletePinButton, &QToolButton::clicked,
                 this, &MainWindow::deleteSelectedPin);
+
+        markerList = new QListWidget(countPanel);
+        markerList->setSelectionMode(QAbstractItemView::NoSelection);
+        markerList->setStyleSheet("QListWidget::item { padding: 0px; }");
+        countLayout->addWidget(markerList, 1);
+
+        auto *hint = new QLabel("Right-click a marker on the page to remove it.",
+                                countPanel);
+        hint->setWordWrap(true);
+        hint->setStyleSheet("color: #818a96; font-size: 11px;");
+        countLayout->addWidget(hint);
 
         for (QAction *action : {addCounterAction, renameCounterAction,
                                 removeCounterAction, clearMarkersAction}) {
@@ -2103,7 +2165,6 @@ public:
             button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
             countLayout->addWidget(button);
         }
-        countLayout->addStretch();
 
         auto *countDock = new QDockWidget("Counters", this);
         countDock->setObjectName("countersDock");
@@ -2115,7 +2176,7 @@ public:
         connect(canvas, &PdfCanvas::countChanged, this, [this] {
             if (navMarker && !canvas->hasMarker(navMarker))
                 navMarker = nullptr;
-            refreshCountLabel();
+            refreshCountUi();
         });
 
         connect(canvas, &PdfCanvas::markerSelected,
@@ -2354,6 +2415,7 @@ public:
             if (pageCount > 0 && page != currentPage + 1) {
                 currentPage = page - 1;
                 canvas->setCurrentPage(currentPage);
+                refreshCountUi();
                 fitOnNextRender = true;
                 renderTimer.start(0);
             }
@@ -2554,6 +2616,7 @@ private slots:
         );
 
         canvas->setCurrentPage(currentPage);
+        refreshCountUi();
 
         statusBar()->showMessage(
             QString("Opened %1 pages").arg(pageCount)
@@ -2960,7 +3023,7 @@ private slots:
         }
 
         rebuildCounterCombo();
-        refreshCountLabel();
+        refreshCountUi();
         saveCounters();
         statusBar()->showMessage(QString("Renamed the counter to %1.").arg(name));
     }
@@ -3053,7 +3116,7 @@ private slots:
         canvas->setActiveCounter(activeCounterId,
                                  counter ? counter->color : QColor());
         rebuildCounterCombo();
-        refreshCountLabel();
+        refreshCountUi();
     }
 
     // Chooses a counter by its position in the list (0 is the first).
@@ -3120,62 +3183,140 @@ private slots:
         counterCombo->blockSignals(false);
     }
 
-    // Shows the active counter's pins on this page and in the whole document.
-    void refreshCountLabel()
+    // Updates the counter totals and the marker list for the active counter.
+    void refreshCountUi()
     {
         const CounterDef *active = findCounter(activeCounterId);
         if (!active) {
             countTotalLabel->setText("No counter");
-            return;
+        } else {
+            countTotalLabel->setText(
+                QString("%1: this page %2, all pages %3")
+                    .arg(active->name)
+                    .arg(canvas->countOn(currentPage, active->id))
+                    .arg(canvas->countTotal(active->id))
+            );
         }
 
-        countTotalLabel->setText(
-            QString("%1: this page %2, all pages %3")
-                .arg(active->name)
-                .arg(canvas->countOn(currentPage, active->id))
-                .arg(canvas->countTotal(active->id))
-        );
+        refreshMarkerList();
+    }
+
+    // The pins the list and the [ ] buttons move through: the whole document,
+    // or only the current page.
+    QList<QPair<int, CountMarkerItem *>> navigationRows() const
+    {
+        if (!navPageOnly)
+            return canvas->markersFor(activeCounterId);
+
+        QList<QPair<int, CountMarkerItem *>> rows;
+        for (CountMarkerItem *marker : canvas->markersOn(currentPage, activeCounterId))
+            rows.append({currentPage, marker});
+        return rows;
+    }
+
+    void refreshMarkerList()
+    {
+        if (!markerList)
+            return;
+
+        markerList->clear();
+        const auto rows = navigationRows();
+        for (int index = 0; index < rows.size(); ++index) {
+            const int page = rows.at(index).first;
+            CountMarkerItem *marker = rows.at(index).second;
+
+            auto *rowWidget = new QWidget;
+            auto *rowLayout = new QHBoxLayout(rowWidget);
+            rowLayout->setContentsMargins(0, 0, 0, 0);
+            rowLayout->setSpacing(2);
+
+            auto *viewButton = new QPushButton(
+                QString("Marker #%1 · Page %2").arg(index + 1).arg(page + 1),
+                rowWidget);
+            viewButton->setFlat(true);
+            viewButton->setStyleSheet(
+                "QPushButton { text-align: left; padding: 4px 8px;"
+                " background: transparent; border: none; }"
+                "QPushButton:hover { background: #303740; }");
+            viewButton->setToolTip("Zoom to this pin");
+
+            auto *removeButton = new QToolButton(rowWidget);
+            removeButton->setIcon(themeIcon("edit-delete",
+                          style()->standardIcon(QStyle::SP_TrashIcon)));
+            removeButton->setIconSize(QSize(16, 16));
+            removeButton->setStyleSheet(
+                "QToolButton { padding: 4px; background: transparent;"
+                " border: none; }"
+                "QToolButton:hover { background: #303740; }");
+            removeButton->setToolTip("Delete this pin");
+
+            rowLayout->addWidget(viewButton, 1);
+            rowLayout->addWidget(removeButton);
+
+            connect(viewButton, &QPushButton::clicked, this,
+                    [this, page, marker] { showMarker(page, marker); });
+
+            // Deferred, because removing the pin rebuilds this list and the
+            // button being clicked is one of the rows that gets freed.
+            connect(removeButton, &QToolButton::clicked, this,
+                    [this, marker] {
+                QTimer::singleShot(0, this, [this, marker] {
+                    if (canvas->hasMarker(marker))
+                        canvas->removeMarker(marker);
+                });
+            });
+
+            auto *item = new QListWidgetItem(markerList);
+            item->setSizeHint(QSize(120, 34));
+            markerList->setItemWidget(item, rowWidget);
+        }
     }
 
     // Moves to the next (direction > 0) or previous pin of the active
-    // counter on the current page, wrapping at the ends.
+    // counter across all pages, wrapping at the ends.
     void stepCounter(int direction)
     {
-        const QList<CountMarkerItem *> marks =
-            canvas->markersOn(currentPage, activeCounterId);
-        if (marks.isEmpty()) {
-            statusBar()->showMessage("No pins for this counter on this page.");
+        const auto rows = navigationRows();
+        if (rows.isEmpty()) {
+            statusBar()->showMessage("No pins to step through.");
             return;
         }
 
         int index = -1;
-        for (int i = 0; i < marks.size(); ++i) {
-            if (marks.at(i) == navMarker) {
+        for (int i = 0; i < rows.size(); ++i) {
+            if (rows.at(i).second == navMarker) {
                 index = i;
                 break;
             }
         }
 
-        // Only a pin found on this page is safe to touch: an undone pin may
-        // have been freed already, and there may be none yet.
-        if (index >= 0)
-            navMarker->setHighlighted(false);
-
         // Starting from no pin: next is the first, previous is the last.
         if (index < 0)
-            index = direction > 0 ? -1 : marks.size();
+            index = direction > 0 ? -1 : rows.size();
 
-        index = (index + direction + marks.size()) % marks.size();
+        index = (index + direction + rows.size()) % rows.size();
 
-        CountMarkerItem *marker = marks.at(index);
+        showMarker(rows.at(index).first, rows.at(index).second);
+        statusBar()->showMessage(
+            QString("Pin %1 of %2").arg(index + 1).arg(rows.size()));
+    }
+
+    void highlightMarker(CountMarkerItem *marker)
+    {
+        if (navMarker && canvas->hasMarker(navMarker))
+            navMarker->setHighlighted(false);
+
         navMarker = marker;
         marker->setHighlighted(true);
+    }
 
-        focusPin(marker->fraction());
-        statusBar()->showMessage(
-            QString("Pin %1 of %2 on this page")
-                .arg(index + 1).arg(marks.size())
-        );
+    void showMarker(int page, CountMarkerItem *marker)
+    {
+        if (!canvas->hasMarker(marker))
+            return;
+
+        highlightMarker(marker);
+        jumpToPin(page, marker->fraction());
     }
 
     // Marks a pin as the one being worked on, for stepping and deleting.
@@ -3186,11 +3327,7 @@ private slots:
             return;
         }
 
-        if (navMarker && canvas->hasMarker(navMarker))
-            navMarker->setHighlighted(false);
-
-        navMarker = marker;
-        marker->setHighlighted(true);
+        highlightMarker(marker);
         canvas->setFocus();
         statusBar()->showMessage(
             "Pin selected. Click it again or press Delete to remove it.");
@@ -3373,6 +3510,7 @@ private:
     QSpinBox *pageNumber = nullptr;
     QLabel *zoomLabel = nullptr;
     QLabel *countTotalLabel = nullptr;
+    QListWidget *markerList = nullptr;
     QLabel *pdfNameLabel = nullptr;
     QToolButton *copyPdfNameButton = nullptr;
     QAction *pencilAction = nullptr;
@@ -3388,6 +3526,7 @@ private:
     int activeCounterId = -1;
     // The pin the last [ or ] step went to, so the next step continues on.
     CountMarkerItem *navMarker = nullptr;
+    bool navPageOnly = false;
 
     QThread renderThread;
     PdfWorker *worker = nullptr;
