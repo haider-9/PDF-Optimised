@@ -2,6 +2,15 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDockWidget>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFile>
+#include <QSaveFile>
+#include <QSet>
+#include <QStandardPaths>
 #include <QMainWindow>
 #include <QGraphicsView>
 #include <QGraphicsScene>
@@ -345,6 +354,11 @@ public:
     int number() const
     {
         return m_number;
+    }
+
+    QColor color() const
+    {
+        return m_color;
     }
 
     // A highlighted pin gets a ring, so the one being stepped to stands out.
@@ -1218,6 +1232,7 @@ public:
 
         scene()->removeItem(last.second);
         m_redoStack.append(last);
+        emit strokesChanged();
 
         return true;
     }
@@ -1233,6 +1248,7 @@ public:
         stroke.second->setVisible(stroke.first == m_currentPage);
         m_annotations[stroke.first].append(stroke.second);
         m_strokeOrder.append(stroke);
+        emit strokesChanged();
 
         return true;
     }
@@ -1293,6 +1309,136 @@ public:
             setWidth(item, 3.0);
     }
 
+    // Records the page's size in scene units, so its pins and strokes can be
+    // saved as fractions of the page and placed again on the next open.
+    void setPageRect(int page, const QRectF &rect)
+    {
+        m_pageRects.insert(page, rect);
+    }
+
+    QJsonObject annotationsJson() const
+    {
+        QJsonObject pages;
+        for (auto it = m_pageRects.cbegin(); it != m_pageRects.cend(); ++it) {
+            const QRectF &r = it.value();
+            pages.insert(QString::number(it.key()),
+                         QJsonArray{r.left(), r.top(), r.width(), r.height()});
+        }
+
+        QJsonArray pins;
+        for (auto it = m_countMarkers.cbegin(); it != m_countMarkers.cend(); ++it) {
+            for (const CountMarkerItem *marker : it.value()) {
+                const QPointF f = marker->fraction();
+                pins.append(QJsonObject{
+                    {"page", it.key()},
+                    {"counter", marker->counter()},
+                    {"x", f.x()},
+                    {"y", f.y()},
+                    {"color", marker->color().name()}
+                });
+            }
+        }
+
+        QJsonArray strokes;
+        for (const auto &entry : m_strokeOrder) {
+            const QRectF rect = m_pageRects.value(entry.first);
+            if (rect.isEmpty())
+                continue;
+
+            const QPainterPath path = entry.second->path();
+            QJsonArray points;
+            for (int i = 0; i < path.elementCount(); ++i) {
+                const QPainterPath::Element e = path.elementAt(i);
+                points.append(QJsonArray{
+                    (e.x - rect.left()) / rect.width(),
+                    (e.y - rect.top()) / rect.height()
+                });
+            }
+
+            strokes.append(QJsonObject{
+                {"page", entry.first},
+                {"color", entry.second->pen().color().name()},
+                {"width", entry.second->data(kBaseWidthKey).toDouble()},
+                {"points", points}
+            });
+        }
+
+        return QJsonObject{{"pages", pages}, {"pins", pins},
+                           {"strokes", strokes}};
+    }
+
+    // Rebuilds saved pins and strokes. Pins of counters not in counterIds
+    // are skipped, since their counter no longer exists.
+    void loadAnnotations(const QJsonObject &root, const QSet<int> &counterIds)
+    {
+        const QJsonObject pages = root.value("pages").toObject();
+        for (auto it = pages.constBegin(); it != pages.constEnd(); ++it) {
+            const QJsonArray r = it.value().toArray();
+            if (r.size() == 4) {
+                m_pageRects.insert(it.key().toInt(),
+                    QRectF(r.at(0).toDouble(), r.at(1).toDouble(),
+                           r.at(2).toDouble(), r.at(3).toDouble()));
+            }
+        }
+
+        for (const QJsonValue &value : root.value("pins").toArray()) {
+            const QJsonObject pin = value.toObject();
+            const int page = pin.value("page").toInt();
+            const int counter = pin.value("counter").toInt();
+            const QRectF rect = m_pageRects.value(page);
+            if (rect.isEmpty() || !counterIds.contains(counter))
+                continue;
+
+            const QPointF fraction(pin.value("x").toDouble(),
+                                   pin.value("y").toDouble());
+            auto *marker = new CountMarkerItem(
+                1, counter, QColor(pin.value("color").toString()));
+            marker->setPos(
+                rect.left() + fraction.x() * rect.width(),
+                rect.top() + fraction.y() * rect.height());
+            marker->setFraction(fraction);
+            marker->setZValue(20);
+            marker->setVisible(page == m_currentPage);
+            scene()->addItem(marker);
+            m_countMarkers[page].append(marker);
+            m_markerOrder.append(marker);
+        }
+        renumberMarkers();
+
+        for (const QJsonValue &value : root.value("strokes").toArray()) {
+            const QJsonObject stroke = value.toObject();
+            const int page = stroke.value("page").toInt();
+            const QRectF rect = m_pageRects.value(page);
+            const QJsonArray points = stroke.value("points").toArray();
+            if (rect.isEmpty() || points.isEmpty())
+                continue;
+
+            QPainterPath path;
+            for (int i = 0; i < points.size(); ++i) {
+                const QJsonArray p = points.at(i).toArray();
+                const QPointF point(
+                    rect.left() + p.at(0).toDouble() * rect.width(),
+                    rect.top() + p.at(1).toDouble() * rect.height());
+                if (i == 0)
+                    path.moveTo(point);
+                else
+                    path.lineTo(point);
+            }
+
+            const double width = stroke.value("width").toDouble();
+            const QPen pen(QColor(stroke.value("color").toString()), width,
+                           Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+            auto *item = scene()->addPath(path, pen);
+            item->setZValue(10);
+            item->setData(kBaseWidthKey, width);
+            item->setVisible(page == m_currentPage);
+            m_annotations[page].append(item);
+            m_strokeOrder.append({page, item});
+        }
+
+        emit annotationsLoaded();
+    }
+
     void clearAnnotations()
     {
         for (auto it = m_annotations.begin();
@@ -1305,6 +1451,7 @@ public:
 
         m_annotations.clear();
         m_strokeOrder.clear();
+        m_pageRects.clear();
         discardRedo();
         m_highlighted = nullptr;
         m_currentPathItem = nullptr;
@@ -1318,6 +1465,8 @@ signals:
     void markerSelected(CountMarkerItem *marker);
     void markerDeleteRequested(CountMarkerItem *marker);
     void countChanged();
+    void strokesChanged();
+    void annotationsLoaded();
     void viewportResized();
     void linkClicked(const QPointF &scenePos);
     void hovered(const QPointF &scenePos);
@@ -1447,7 +1596,9 @@ protected:
     {
         if (event->button() == Qt::LeftButton && m_drawing) {
             m_drawing = false;
-            if (!isLongEnough(m_currentPathItem))
+            if (isLongEnough(m_currentPathItem))
+                emit strokesChanged();
+            else
                 discardLastStroke();
             m_currentPathItem = nullptr;
             event->accept();
@@ -1549,6 +1700,7 @@ private:
 
     // Strokes in the order they were drawn, for undo.
     QList<QPair<int, QGraphicsPathItem *>> m_strokeOrder;
+    QHash<int, QRectF> m_pageRects;
 
     // Undone strokes, kept off the scene so they can be redone.
     QList<QPair<int, QGraphicsPathItem *>> m_redoStack;
@@ -2177,7 +2329,14 @@ public:
             if (navMarker && !canvas->hasMarker(navMarker))
                 navMarker = nullptr;
             refreshCountUi();
+            saveAnnotations();
         });
+
+        connect(canvas, &PdfCanvas::strokesChanged,
+                this, &MainWindow::saveAnnotations);
+
+        connect(canvas, &PdfCanvas::annotationsLoaded,
+                this, &MainWindow::refreshCountUi);
 
         connect(canvas, &PdfCanvas::markerSelected,
                 this, &MainWindow::selectMarker);
@@ -2547,6 +2706,8 @@ private slots:
             return;
 
         pendingOpenPath = path;
+        // Clearing the old document's pins must not overwrite its saved file.
+        annotationsReady = false;
         openId = ++lastOpenId;
         worker->latestOpen.store(openId);
 
@@ -2585,6 +2746,56 @@ private slots:
         emit openRequested(path, openId);
     }
 
+    QString annotationsFile() const
+    {
+        const QByteArray key = QCryptographicHash::hash(
+            QFileInfo(currentPdfPath).absoluteFilePath().toUtf8(),
+            QCryptographicHash::Sha256).toHex();
+        return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+            + "/annotations/" + key + ".json";
+    }
+
+    void loadAnnotations()
+    {
+        annotationsReady = true;
+
+        QFile file(annotationsFile());
+        if (!file.open(QIODevice::ReadOnly))
+            return;
+
+        const QJsonDocument document =
+            QJsonDocument::fromJson(file.readAll());
+        if (!document.isObject()) {
+            // Leave the unreadable file alone instead of overwriting it.
+            annotationsReady = false;
+            statusBar()->showMessage("Saved pins could not be read.");
+            return;
+        }
+
+        QSet<int> counterIds;
+        for (const CounterDef &counter : counters)
+            counterIds.insert(counter.id);
+
+        canvas->loadAnnotations(document.object(), counterIds);
+    }
+
+    void saveAnnotations()
+    {
+        if (!annotationsReady || currentPdfPath.isEmpty())
+            return;
+
+        const QString path = annotationsFile();
+        QDir().mkpath(QFileInfo(path).absolutePath());
+
+        QSaveFile output(path);
+        if (!output.open(QIODevice::WriteOnly))
+            return;
+
+        output.write(QJsonDocument(canvas->annotationsJson())
+                         .toJson(QJsonDocument::Compact));
+        output.commit();
+    }
+
     void onDocumentOpened(int count, const QString &path, quint64 id)
     {
         // Results from superseded opens are ignored.
@@ -2593,6 +2804,7 @@ private slots:
 
         pendingOpenPath.clear();
         currentPdfPath = path;
+        loadAnnotations();
         rememberRecentFile(QFileInfo(path).absoluteFilePath());
         stack->setCurrentWidget(canvas);
 
@@ -2726,6 +2938,7 @@ private slots:
         pageItem->setPos(pixelX / renderScale, pixelY / renderScale);
 
         scene->setSceneRect(pageItem->sceneBoundingRect());
+        canvas->setPageRect(currentPage, scene->sceneRect());
     }
 
     // Links depend only on the page, so they are read once per page.
@@ -3036,6 +3249,7 @@ private slots:
         settings.beginWriteArray("counters", counters.size());
         for (int i = 0; i < counters.size(); ++i) {
             settings.setArrayIndex(i);
+            settings.setValue("id", counters.at(i).id);
             settings.setValue("name", counters.at(i).name);
             settings.setValue("color", counters.at(i).color.name());
         }
@@ -3050,7 +3264,10 @@ private slots:
             settings.setArrayIndex(i);
 
             CounterDef counter;
-            counter.id = nextCounterId++;
+            counter.id = settings.value("id").toInt();
+            if (counter.id <= 0)
+                counter.id = nextCounterId;
+            nextCounterId = std::max(nextCounterId, counter.id) + 1;
             counter.name = settings.value("name").toString();
             if (counter.name.isEmpty())
                 counter.name = QString("Counter %1").arg(counter.id);
@@ -3549,6 +3766,7 @@ private:
     // The pin the last [ or ] step went to, so the next step continues on.
     CountMarkerItem *navMarker = nullptr;
     bool navPageOnly = false;
+    bool annotationsReady = false;
 
     QThread renderThread;
     PdfWorker *worker = nullptr;
