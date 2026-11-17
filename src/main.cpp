@@ -3077,12 +3077,34 @@ private slots:
         canvas->setCountMode(on);
     }
 
-    static QColor counterColor(int index)
+    static const QStringList &counterPalette()
     {
         static const QStringList palette = {
-            "#bd5638", "#2e7d32", "#1565c0", "#6a1b9a", "#ad8b00", "#00838f"
+            "#bd5638", "#2e7d32", "#1565c0", "#6a1b9a", "#ad8b00", "#00838f",
+            "#c2185b", "#5d4037", "#37474f", "#558b2f", "#0277bd", "#ef6c00",
+            "#7b1fa2", "#00695c", "#d84315", "#283593", "#9e9d24", "#4e342e",
+            "#00acc1", "#8e24aa"
         };
+        return palette;
+    }
+
+    static QColor counterColor(int index)
+    {
+        const QStringList &palette = counterPalette();
         return QColor(palette.at(index % palette.size()));
+    }
+
+    QColor nextCounterColor() const
+    {
+        for (const QString &hex : counterPalette()) {
+            const QColor candidate(hex);
+            bool used = false;
+            for (const CounterDef &counter : counters)
+                used = used || counter.color == candidate;
+            if (!used)
+                return candidate;
+        }
+        return counterColor(counters.size());
     }
 
     const CounterDef *findCounter(int id) const
@@ -3099,7 +3121,7 @@ private slots:
         CounterDef counter;
         counter.id = nextCounterId++;
         counter.name = QString("Counter %1").arg(counter.id);
-        counter.color = counterColor(counters.size());
+        counter.color = nextCounterColor();
         counters.append(counter);
 
         selectCounter(counter.id);
