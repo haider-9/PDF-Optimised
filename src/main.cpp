@@ -2101,7 +2101,7 @@ public:
         auto *toolbar = addToolBar("PDF Controls");
         toolbar->setObjectName("mainToolbar");
         toolbar->setMovable(false);
-        toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
 
         QStyle *appStyle = style();
 
@@ -2397,10 +2397,10 @@ public:
         statusBar()->addPermanentWidget(pdfNameContainer);
 
         auto *countsToggleButton = new QToolButton(this);
-        countsToggleButton->setText("Counters");
+        countsToggleButton->setToolTip("Show or hide the counters panel");
         countsToggleButton->setIcon(themeIcon("view-sidebar-right",
                       appStyle->standardIcon(QStyle::SP_FileDialogDetailedView)));
-        countsToggleButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        countsToggleButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
         countsToggleButton->setCheckable(true);
         countsToggleButton->setChecked(true);
         connect(countsToggleButton, &QToolButton::toggled,
