@@ -1,5 +1,7 @@
 
 #include <QApplication>
+#include <QClipboard>
+#include <QDockWidget>
 #include <QMainWindow>
 #include <QGraphicsView>
 #include <QGraphicsScene>
@@ -1108,16 +1110,37 @@ public:
         if (m_markerOrder.isEmpty())
             return false;
 
-        CountMarkerItem *last = m_markerOrder.takeLast();
-        for (auto it = m_countMarkers.begin(); it != m_countMarkers.end(); ++it)
-            it.value().removeAll(last);
+        removeMarker(m_markerOrder.last());
+        return true;
+    }
 
-        scene()->removeItem(last);
-        delete last;
+    bool hasMarker(CountMarkerItem *marker) const
+    {
+        return m_markerOrder.contains(marker);
+    }
+
+    void removeMarker(CountMarkerItem *marker)
+    {
+        m_markerOrder.removeAll(marker);
+        for (auto it = m_countMarkers.begin(); it != m_countMarkers.end(); ++it)
+            it.value().removeAll(marker);
+
+        scene()->removeItem(marker);
+        delete marker;
 
         renumberMarkers();
         emit countChanged();
-        return true;
+    }
+
+    // The pin under a view position, ignoring the placement preview.
+    CountMarkerItem *markerAt(const QPoint &viewPos) const
+    {
+        for (QGraphicsItem *item : items(viewPos)) {
+            auto *marker = dynamic_cast<CountMarkerItem *>(item);
+            if (marker && marker != m_countPreview)
+                return marker;
+        }
+        return nullptr;
     }
 
     // Numbers each counter's pins 1, 2, 3... in order on every page.
@@ -1287,6 +1310,8 @@ signals:
     void zoomChanged(double zoom);
     void pencilModeChanged(bool enabled);
     void countModeChanged(bool enabled);
+    void markerSelected(CountMarkerItem *marker);
+    void markerDeleteRequested(CountMarkerItem *marker);
     void countChanged();
     void viewportResized();
     void linkClicked(const QPointF &scenePos);
@@ -1352,6 +1377,14 @@ protected:
 
             event->accept();
             return;
+        }
+
+        if (event->button() == Qt::RightButton && m_countMode) {
+            if (CountMarkerItem *hit = markerAt(event->position().toPoint())) {
+                emit markerDeleteRequested(hit);
+                event->accept();
+                return;
+            }
         }
 
         if (event->button() == Qt::MiddleButton) {
@@ -1431,6 +1464,13 @@ protected:
             if (moved.manhattanLength() < 4) {
                 const QPointF scenePos = mapToScene(event->position().toPoint());
                 if (m_countMode) {
+                    if (CountMarkerItem *hit =
+                            markerAt(event->position().toPoint())) {
+                        emit markerSelected(hit);
+                        event->accept();
+                        return;
+                    }
+
                     const QRectF page = scene()->sceneRect();
                     if (m_activeCounter >= 0 && page.contains(scenePos)) {
                         const QPointF fraction(
@@ -1965,34 +2005,36 @@ public:
         connect(countAction, &QAction::triggered,
             this, &MainWindow::toggleCountMode);
 
-        counterCombo = new QComboBox(toolbar);
+        counterCombo = new QComboBox(this);
         counterCombo->setToolTip("Counter that new pins belong to (1-9)");
         counterCombo->setEnabled(false);
-        toolbar->addWidget(counterCombo);
 
-        addCounterAction = toolbar->addAction(
+        addCounterAction = new QAction(
             themeIcon("list-add",
                       appStyle->standardIcon(QStyle::SP_FileDialogNewFolder)),
-            "New Counter"
+            "New Counter",
+            this
         );
         addCounterAction->setToolTip("Add a counter");
         connect(addCounterAction, &QAction::triggered,
                 this, [this] { addCounter(); });
 
-        renameCounterAction = toolbar->addAction(
+        renameCounterAction = new QAction(
             themeIcon("document-edit",
                       appStyle->standardIcon(QStyle::SP_FileDialogDetailedView)),
-            "Rename Counter"
+            "Rename Counter",
+            this
         );
         renameCounterAction->setEnabled(false);
         renameCounterAction->setToolTip("Rename the active counter");
         connect(renameCounterAction, &QAction::triggered,
                 this, &MainWindow::renameActiveCounter);
 
-        removeCounterAction = toolbar->addAction(
+        removeCounterAction = new QAction(
             themeIcon("list-remove",
                       appStyle->standardIcon(QStyle::SP_TrashIcon)),
-            "Remove Counter"
+            "Remove Counter",
+            this
         );
         removeCounterAction->setEnabled(false);
         removeCounterAction->setToolTip("Remove the active counter and its pins");
@@ -2002,10 +2044,11 @@ public:
         connect(counterCombo, &QComboBox::activated,
                 this, &MainWindow::selectCounterAt);
 
-        clearMarkersAction = toolbar->addAction(
+        clearMarkersAction = new QAction(
             themeIcon("edit-clear",
                       appStyle->standardIcon(QStyle::SP_DialogResetButton)),
-            "Clear Markers"
+            "Clear Markers",
+            this
         );
         clearMarkersAction->setEnabled(false);
         clearMarkersAction->setToolTip("Remove all placed pins");
@@ -2025,8 +2068,74 @@ public:
             navMarker = nullptr;
         });
 
-        connect(canvas, &PdfCanvas::countChanged,
-            this, [this] { refreshCountLabel(); });
+        auto *countPanel = new QWidget(this);
+        auto *countLayout = new QVBoxLayout(countPanel);
+        countLayout->setContentsMargins(8, 8, 8, 8);
+        countLayout->setSpacing(6);
+        countTotalLabel = new QLabel("No counter", countPanel);
+        countTotalLabel->setObjectName("countTotal");
+        countTotalLabel->setWordWrap(true);
+        countLayout->addWidget(countTotalLabel);
+        countLayout->addWidget(counterCombo);
+
+        auto *pinRow = new QHBoxLayout();
+        auto *previousPinButton = new QPushButton("Previous pin", countPanel);
+        auto *nextPinButton = new QPushButton("Next pin", countPanel);
+        pinRow->addWidget(previousPinButton);
+        pinRow->addWidget(nextPinButton);
+        countLayout->addLayout(pinRow);
+
+        auto *deletePinButton = new QPushButton("Delete selected pin", countPanel);
+        countLayout->addWidget(deletePinButton);
+
+        connect(previousPinButton, &QPushButton::clicked,
+                this, [this] { stepCounter(-1); });
+        connect(nextPinButton, &QPushButton::clicked,
+                this, [this] { stepCounter(1); });
+        connect(deletePinButton, &QPushButton::clicked,
+                this, &MainWindow::deleteSelectedPin);
+
+        for (QAction *action : {addCounterAction, renameCounterAction,
+                                removeCounterAction, clearMarkersAction}) {
+            auto *button = new QToolButton(countPanel);
+            button->setDefaultAction(action);
+            button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+            button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            countLayout->addWidget(button);
+        }
+        countLayout->addStretch();
+
+        auto *countDock = new QDockWidget("Counters", this);
+        countDock->setObjectName("countersDock");
+        countDock->setFeatures(QDockWidget::DockWidgetMovable
+                               | QDockWidget::DockWidgetFloatable);
+        countDock->setWidget(countPanel);
+        addDockWidget(Qt::RightDockWidgetArea, countDock);
+
+        connect(canvas, &PdfCanvas::countChanged, this, [this] {
+            if (navMarker && !canvas->hasMarker(navMarker))
+                navMarker = nullptr;
+            refreshCountLabel();
+        });
+
+        connect(canvas, &PdfCanvas::markerSelected,
+                this, &MainWindow::selectMarker);
+
+        connect(canvas, &PdfCanvas::markerDeleteRequested, this,
+                [this](CountMarkerItem *marker) {
+            canvas->removeMarker(marker);
+            statusBar()->showMessage("Deleted the pin.");
+        });
+
+        canvas->setFocusPolicy(Qt::StrongFocus);
+        for (const QKeySequence &sequence : {
+                 QKeySequence(Qt::Key_Delete),
+                 QKeySequence(Qt::Key_Backspace)}) {
+            auto *deleteShortcut = new QShortcut(sequence, canvas);
+            deleteShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+            connect(deleteShortcut, &QShortcut::activated,
+                    this, &MainWindow::deleteSelectedPin);
+        }
 
         pageNumber = new QSpinBox(this);
         pageNumber->setMinimum(1);
@@ -2040,9 +2149,45 @@ public:
                          QSizePolicy::Preferred);
         toolbar->addWidget(toolbarSpacer);
 
-        countTotalLabel = new QLabel("No counter", toolbar);
-        countTotalLabel->setObjectName("countTotal");
-        toolbar->addWidget(countTotalLabel);
+        // Status bar, left to right: PDF name, counter totals, zoom.
+        pdfNameLabel = new QLabel("No PDF open", this);
+        pdfNameLabel->setStyleSheet("color: #9da6b1; font-size: 12px;");
+        pdfNameLabel->setMaximumWidth(220);
+
+        copyPdfNameButton = new QToolButton(this);
+        copyPdfNameButton->setIcon(themeIcon("edit-copy",
+                      appStyle->standardIcon(QStyle::SP_FileDialogDetailedView)));
+        copyPdfNameButton->setToolTip("Copy PDF name to clipboard");
+        copyPdfNameButton->setEnabled(false);
+
+        connect(copyPdfNameButton, &QToolButton::clicked, this, [this]() {
+            if (!currentPdfPath.isEmpty()) {
+                QApplication::clipboard()->setText(
+                    QFileInfo(currentPdfPath).completeBaseName());
+                statusBar()->showMessage("PDF name copied to clipboard!");
+            }
+        });
+
+        auto *pdfNameContainer = new QWidget(this);
+        auto *pdfNameLayout = new QHBoxLayout(pdfNameContainer);
+        pdfNameLayout->setContentsMargins(0, 0, 10, 0);
+        pdfNameLayout->setSpacing(6);
+        pdfNameLayout->addWidget(pdfNameLabel);
+        pdfNameLayout->addWidget(copyPdfNameButton);
+        statusBar()->addPermanentWidget(pdfNameContainer);
+
+        auto *countsToggleButton = new QToolButton(this);
+        countsToggleButton->setText("Counters");
+        countsToggleButton->setIcon(themeIcon("view-sidebar-right",
+                      appStyle->standardIcon(QStyle::SP_FileDialogDetailedView)));
+        countsToggleButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        countsToggleButton->setCheckable(true);
+        countsToggleButton->setChecked(true);
+        connect(countsToggleButton, &QToolButton::toggled,
+                countDock, &QWidget::setVisible);
+        connect(countDock, &QDockWidget::visibilityChanged,
+                countsToggleButton, &QToolButton::setChecked);
+        toolbar->addWidget(countsToggleButton);
 
         zoomLabel = new QLabel("100%", this);
 
@@ -2138,8 +2283,12 @@ public:
         connect(openAction, &QAction::triggered,
                 this, &MainWindow::choosePdf);
 
-        connect(homeAction, &QAction::triggered,
-                this, &MainWindow::showHome);
+        connect(homeAction, &QAction::triggered, this, [this] {
+            showHome();
+            pdfNameLabel->setText("No PDF open");
+            copyPdfNameButton->setEnabled(false);
+            currentPdfPath.clear();
+        });
 
         connect(previousAction, &QAction::triggered,
                 this, &MainWindow::previousPage);
@@ -2381,6 +2530,7 @@ private slots:
             return;
 
         pendingOpenPath.clear();
+        currentPdfPath = path;
         rememberRecentFile(QFileInfo(path).absoluteFilePath());
         stack->setCurrentWidget(canvas);
 
@@ -2392,6 +2542,12 @@ private slots:
         pageNumber->setValue(1);
         pageNumber->blockSignals(false);
         pageNumber->setEnabled(true);
+
+        // Update PDF name display
+        const QString pdfName = QFileInfo(path).completeBaseName();
+        pdfNameLabel->setText(pdfName);
+        pdfNameLabel->setToolTip(pdfName);
+        copyPdfNameButton->setEnabled(true);
 
         setWindowTitle(
             "CanvasPDF - " + QFileInfo(path).fileName()
@@ -3022,6 +3178,36 @@ private slots:
         );
     }
 
+    // Marks a pin as the one being worked on, for stepping and deleting.
+    void selectMarker(CountMarkerItem *marker)
+    {
+        if (marker == navMarker) {
+            deleteSelectedPin();
+            return;
+        }
+
+        if (navMarker && canvas->hasMarker(navMarker))
+            navMarker->setHighlighted(false);
+
+        navMarker = marker;
+        marker->setHighlighted(true);
+        canvas->setFocus();
+        statusBar()->showMessage(
+            "Pin selected. Click it again or press Delete to remove it.");
+    }
+
+    void deleteSelectedPin()
+    {
+        if (!navMarker || !canvas->hasMarker(navMarker)) {
+            statusBar()->showMessage("Select a pin first.");
+            return;
+        }
+
+        canvas->removeMarker(navMarker);
+        navMarker = nullptr;
+        statusBar()->showMessage("Deleted the pin.");
+    }
+
     // Shows a pin: zooms in on it and centers the view, changing page if
     // needed.
     void jumpToPin(int page, const QPointF &fraction)
@@ -3187,6 +3373,8 @@ private:
     QSpinBox *pageNumber = nullptr;
     QLabel *zoomLabel = nullptr;
     QLabel *countTotalLabel = nullptr;
+    QLabel *pdfNameLabel = nullptr;
+    QToolButton *copyPdfNameButton = nullptr;
     QAction *pencilAction = nullptr;
     QAction *countAction = nullptr;
     QAction *clearMarkersAction = nullptr;
@@ -3222,6 +3410,7 @@ private:
     quint64 lastOpenId = 0;
     quint64 openId = 0;
     QString pendingOpenPath;
+    QString currentPdfPath;
     bool fitOnNextRender = true;
     int thumbnailPage = -1;
 };
